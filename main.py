@@ -128,9 +128,30 @@ WantedBy=multi-user.target
 
 
 class Plugin:
+    _PATH_ENV = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    _CMD_TIMEOUT_SEC = 45
+
+    def _tool(self, name: str) -> str:
+        for candidate in (f"/usr/bin/{name}", f"/bin/{name}"):
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        return name
+
     def _run(self, command: str, check: bool = False) -> subprocess.CompletedProcess:
+        env = os.environ.copy()
+        env["PATH"] = self._PATH_ENV
         decky.logger.info("exec: %s", command)
-        result = subprocess.run(command, shell=True, text=True, capture_output=True)
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                text=True,
+                capture_output=True,
+                env=env,
+                timeout=self._CMD_TIMEOUT_SEC,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"command timed out after {self._CMD_TIMEOUT_SEC}s") from exc
         if check and result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip() or command)
         return result
@@ -193,15 +214,17 @@ class Plugin:
         return device_path
 
     def _root_mount_sources(self) -> List[str]:
-        result = self._run("findmnt -no SOURCE / /home 2>/dev/null || true")
+        findmnt = self._tool("findmnt")
+        result = self._run(f"{findmnt} -no SOURCE / /home 2>/dev/null || true")
         return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
     def _is_system_device(self, path: str, mountpoint: str) -> bool:
         critical = ("/", "/home", "/var", "/usr", "/boot", "/etc")
 
         if not mountpoint:
+            findmnt = self._tool("findmnt")
             mountpoint = self._run(
-                f"findmnt -no TARGET {shlex.quote(path)} 2>/dev/null || true"
+                f"{findmnt} -no TARGET {shlex.quote(path)} 2>/dev/null || true"
             ).stdout.strip()
 
         # User library mounts (udisks / Steam) are never "system" for our UI
@@ -236,8 +259,9 @@ class Plugin:
             "NAME,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINT",
         )
         notes: List[str] = []
+        lsblk = self._tool("lsblk")
         for columns in column_sets:
-            result = self._run(f"/usr/bin/lsblk -J -o {columns} 2>&1")
+            result = self._run(f"{lsblk} -J -o {columns} 2>&1")
             if result.returncode != 0:
                 err = (result.stderr or result.stdout or "").strip().split("\n")[0]
                 notes.append(f"lsblk({columns[:20]}…): {err}")
@@ -294,11 +318,52 @@ class Plugin:
             "can_format": str(entry_type in ("disk", "part") and not is_system).lower(),
         }
 
+    def _append_device(
+        self,
+        entries: List[Dict[str, str]],
+        seen_paths: set[str],
+        path: str,
+        mountpoint: str,
+        fstype: str,
+        label: str,
+        transport: str,
+        entry_type: str = "part",
+        size: str = "?",
+    ) -> bool:
+        if not path or path in seen_paths:
+            return False
+        if not DEVICE_PATH_PATTERN.match(path):
+            return False
+        name = os.path.basename(path)
+        if self._should_skip_block(name, entry_type):
+            return False
+
+        seen_paths.add(path)
+        is_system = self._is_system_device(path, mountpoint)
+        entries.append(
+            {
+                "id": path,
+                "path": path,
+                "name": name,
+                "size": size,
+                "type": entry_type,
+                "fstype": fstype or "",
+                "label": label or "",
+                "mountpoint": mountpoint or "",
+                "model": "",
+                "transport": transport,
+                "is_system": str(is_system).lower(),
+                "can_format": str(not is_system).lower(),
+            }
+        )
+        return True
+
     def _merge_findmnt_devices(
         self, entries: List[Dict[str, str]], seen_paths: set[str], debug: List[str]
     ) -> None:
         """Add devices visible to Steam (e.g. /run/media/deck/NVMe1TB)."""
-        result = self._run("findmnt -rn -o SOURCE,TARGET,FSTYPE 2>/dev/null || true")
+        findmnt = self._tool("findmnt")
+        result = self._run(f"{findmnt} -rn -o SOURCE,TARGET,FSTYPE 2>/dev/null || true")
         added = 0
         for line in result.stdout.splitlines():
             parts = line.split()
@@ -313,36 +378,72 @@ class Plugin:
             if source in seen_paths:
                 continue
 
+            blkid = self._tool("blkid")
             label = self._run(
-                f"blkid -s LABEL -o value {shlex.quote(source)} 2>/dev/null || true"
+                f"{blkid} -s LABEL -o value {shlex.quote(source)} 2>/dev/null || true"
             ).stdout.strip()
 
-            seen_paths.add(source)
-            is_system = self._is_system_device(source, target)
-            entries.append(
-                {
-                    "id": source,
-                    "path": source,
-                    "name": os.path.basename(source),
-                    "size": "?",
-                    "type": "part",
-                    "fstype": fstype,
-                    "label": label,
-                    "mountpoint": target,
-                    "model": "",
-                    "transport": "mounted",
-                    "is_system": str(is_system).lower(),
-                    "can_format": str(not is_system).lower(),
-                }
-            )
-            added += 1
+            if self._append_device(
+                entries, seen_paths, source, target, fstype, label, "findmnt"
+            ):
+                added += 1
         if added:
             debug.append(f"findmnt: +{added} mounted")
+
+    def _merge_run_media_mounts(
+        self, entries: List[Dict[str, str]], seen_paths: set[str], debug: List[str]
+    ) -> None:
+        """Steam library folders under /run/media/<user>/ (Game Mode)."""
+        deck_user = getattr(decky, "DECKY_USER", "deck")
+        media_root = f"/run/media/{deck_user}"
+        if not os.path.isdir(media_root):
+            debug.append(f"no {media_root}")
+            return
+
+        findmnt = self._tool("findmnt")
+        blkid = self._tool("blkid")
+        added = 0
+        for folder_name in sorted(os.listdir(media_root)):
+            mountpoint = os.path.join(media_root, folder_name)
+            if not os.path.isdir(mountpoint):
+                continue
+
+            source = self._run(
+                f"{findmnt} -no SOURCE {shlex.quote(mountpoint)} 2>/dev/null || true"
+            ).stdout.strip()
+            if not source.startswith("/dev/"):
+                debug.append(f"media:{folder_name} no block source")
+                continue
+
+            label = self._run(
+                f"{blkid} -s LABEL -o value {shlex.quote(source)} 2>/dev/null || true"
+            ).stdout.strip()
+            if not label:
+                label = folder_name
+
+            fstype = self._run(
+                f"{blkid} -s TYPE -o value {shlex.quote(source)} 2>/dev/null || true"
+            ).stdout.strip()
+
+            if self._append_device(
+                entries,
+                seen_paths,
+                source,
+                mountpoint,
+                fstype,
+                label,
+                "steam-media",
+            ):
+                added += 1
+
+        if added:
+            debug.append(f"run/media: +{added}")
 
     def _merge_blkid_devices(
         self, entries: List[Dict[str, str]], seen_paths: set[str], debug: List[str]
     ) -> None:
-        result = self._run("blkid -o device 2>/dev/null || true")
+        blkid = self._tool("blkid")
+        result = self._run(f"{blkid} -o device 2>/dev/null || true")
         added = 0
         for device in result.stdout.splitlines():
             device = device.strip()
@@ -355,35 +456,98 @@ class Plugin:
                 continue
 
             label = self._run(
-                f"blkid -s LABEL -o value {shlex.quote(device)} 2>/dev/null || true"
+                f"{blkid} -s LABEL -o value {shlex.quote(device)} 2>/dev/null || true"
             ).stdout.strip()
             fstype = self._run(
-                f"blkid -s TYPE -o value {shlex.quote(device)} 2>/dev/null || true"
+                f"{blkid} -s TYPE -o value {shlex.quote(device)} 2>/dev/null || true"
             ).stdout.strip()
+            findmnt = self._tool("findmnt")
             mountpoint = self._run(
-                f"findmnt -no TARGET {shlex.quote(device)} 2>/dev/null || true"
+                f"{findmnt} -no TARGET {shlex.quote(device)} 2>/dev/null || true"
             ).stdout.strip()
-            seen_paths.add(device)
-            is_system = self._is_system_device(device, mountpoint)
-            entries.append(
-                {
-                    "id": device,
-                    "path": device,
-                    "name": name,
-                    "size": "?",
-                    "type": "part",
-                    "fstype": fstype,
-                    "label": label,
-                    "mountpoint": mountpoint,
-                    "model": "",
-                    "transport": "blkid",
-                    "is_system": str(is_system).lower(),
-                    "can_format": str(not is_system).lower(),
-                }
-            )
-            added += 1
+            if self._append_device(
+                entries, seen_paths, device, mountpoint, fstype, label, "blkid"
+            ):
+                added += 1
         if added:
             debug.append(f"blkid: +{added}")
+
+    def _merge_proc_partitions(
+        self, entries: List[Dict[str, str]], seen_paths: set[str], debug: List[str]
+    ) -> None:
+        proc_path = "/proc/partitions"
+        if not os.path.isfile(proc_path):
+            return
+        added = 0
+        with open(proc_path, encoding="utf-8") as file:
+            lines = file.readlines()[2:]
+        for line in lines:
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            name = parts[-1]
+            if self._should_skip_block(name, "part"):
+                continue
+            path = f"/dev/{name}"
+            if path in seen_paths or not DEVICE_PATH_PATTERN.match(path):
+                continue
+            if self._append_device(entries, seen_paths, path, "", "", "", "proc"):
+                added += 1
+        if added:
+            debug.append(f"proc: +{added}")
+
+    def _build_scan_result(self) -> Dict[str, Any]:
+        debug_notes: List[str] = []
+        entries: List[Dict[str, str]] = []
+        seen_paths: set[str] = set()
+
+        debug_notes.append(f"plugin {getattr(decky, 'DECKY_PLUGIN_VERSION', '?')}")
+        debug_notes.append(f"user {getattr(decky, 'DECKY_USER', '?')}")
+
+        # Order tuned for Steam Deck Game Mode (mounted libraries first)
+        self._merge_run_media_mounts(entries, seen_paths, debug_notes)
+        self._merge_findmnt_devices(entries, seen_paths, debug_notes)
+
+        payload, lsblk_note = self._lsblk_payload()
+        debug_notes.append(lsblk_note)
+        if payload:
+            for block in self._flatten_lsblk(payload.get("blockdevices", [])):
+                entry = self._entry_from_block(block, seen_paths)
+                if entry:
+                    entries.append(entry)
+
+        self._merge_blkid_devices(entries, seen_paths, debug_notes)
+        self._merge_proc_partitions(entries, seen_paths, debug_notes)
+
+        entries.sort(
+            key=lambda e: (
+                e.get("is_system") == "true",
+                e.get("transport", ""),
+                e.get("path", ""),
+            )
+        )
+
+        error = ""
+        if not entries:
+            error = (
+                "no storage devices found. "
+                "Check plugin logs under homebrew/logs."
+            )
+
+        return {
+            "devices": entries,
+            "debug": "; ".join(debug_notes),
+            "error": error,
+            "ok": not bool(error),
+            "count": len(entries),
+        }
+
+    async def ping(self) -> Dict[str, str]:
+        return {
+            "status": "ok",
+            "version": getattr(decky, "DECKY_PLUGIN_VERSION", "unknown"),
+            "user": getattr(decky, "DECKY_USER", "deck"),
+        }
 
     def _flatten_lsblk(self, devices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         flat: List[Dict[str, Any]] = []
@@ -393,58 +557,31 @@ class Plugin:
                 flat.extend(self._flatten_lsblk([child]))
         return flat
 
-    async def list_storage_devices(self) -> Dict[str, Any]:
-        debug_notes: List[str] = []
-        entries: List[Dict[str, str]] = []
-        seen_paths: set[str] = set()
-
+    async def list_storage_devices(self) -> str:
+        """
+        Returns JSON string for reliable Decky JS bridge parsing.
+        Shape: { devices, debug, error, ok, count }
+        """
         try:
-            payload, lsblk_note = self._lsblk_payload()
-            debug_notes.append(lsblk_note)
-            if payload:
-                for block in self._flatten_lsblk(payload.get("blockdevices", [])):
-                    entry = self._entry_from_block(block, seen_paths)
-                    if entry:
-                        entries.append(entry)
-
-            self._merge_findmnt_devices(entries, seen_paths, debug_notes)
-            self._merge_blkid_devices(entries, seen_paths, debug_notes)
-
-            entries.sort(
-                key=lambda e: (
-                    e.get("is_system") == "true",
-                    e.get("transport", ""),
-                    e.get("path", ""),
-                )
-            )
-
-            error = ""
-            if not entries:
-                error = (
-                    "no block devices found. "
-                    "Try Desktop Mode or check plugin logs."
-                )
-
+            payload = self._build_scan_result()
             decky.logger.info(
-                "list_storage_devices: %s devices (%s)",
-                len(entries),
-                "; ".join(debug_notes),
+                "list_storage_devices: %s devices",
+                payload.get("count", 0),
             )
-
-            return {
-                "devices": entries,
-                "debug": "; ".join(debug_notes),
-                "error": error,
-            }
+            return json.dumps(payload)
         except Exception as exc:
             decky.logger.exception("list_storage_devices failed")
-            return {
-                "devices": [],
-                "debug": "; ".join(debug_notes),
-                "error": str(exc),
-            }
+            return json.dumps(
+                {
+                    "devices": [],
+                    "debug": "",
+                    "error": str(exc),
+                    "ok": False,
+                    "count": 0,
+                }
+            )
 
-    async def list_nvme_devices(self) -> Dict[str, Any]:
+    async def list_nvme_devices(self) -> str:
         """Backward-compatible alias."""
         return await self.list_storage_devices()
 

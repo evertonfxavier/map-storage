@@ -3,6 +3,7 @@ import {
   Dropdown,
   PanelSection,
   PanelSectionRow,
+  Spinner,
   staticClasses,
   TextField,
   ToggleField,
@@ -12,13 +13,15 @@ import {
   definePlugin,
   toaster,
 } from "@decky/api";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { FaHdd } from "react-icons/fa";
 
 type StorageScanResult = {
   devices: StorageDevice[];
   debug: string;
   error: string;
+  ok: boolean;
+  count: number;
 };
 
 type StorageDevice = {
@@ -67,7 +70,10 @@ type StatusResult = {
   configured_label: string;
 };
 
-const listStorageDevices = callable<[], StorageScanResult>("list_storage_devices");
+type ScanUiState = "idle" | "loading" | "ok" | "error";
+
+const listStorageDevices = callable<[], string>("list_storage_devices");
+const pingBackend = callable<[], Record<string, string>>("ping");
 const getConfig = callable<[], PluginConfig>("get_config");
 const saveConfig = callable<
   [device_path: string, label: string, format_on_apply: boolean],
@@ -87,7 +93,7 @@ const getServiceLogs = callable<[lines: number], string>("get_service_logs");
 
 function deviceLabel(dev: StorageDevice): string {
   const meta = [
-    dev.transport !== "unknown" ? dev.transport : "",
+    dev.transport,
     dev.model,
     dev.size,
     dev.type,
@@ -101,14 +107,61 @@ function deviceLabel(dev: StorageDevice): string {
   return `${dev.path} (${meta})`;
 }
 
+function parseScanResult(raw: unknown): StorageScanResult {
+  let data: unknown = raw;
+
+  if (typeof data === "string") {
+    try {
+      data = JSON.parse(data);
+    } catch {
+      const snippet = typeof data === "string" ? data.slice(0, 120) : String(data);
+      return {
+        devices: [],
+        debug: "",
+        error: `Invalid JSON from backend: ${snippet}`,
+        ok: false,
+        count: 0,
+      };
+    }
+  }
+
+  if (Array.isArray(data)) {
+    return {
+      devices: data as StorageDevice[],
+      debug: "legacy list response",
+      error: "",
+      ok: data.length > 0,
+      count: data.length,
+    };
+  }
+
+  const obj = (data ?? {}) as Record<string, unknown>;
+  const devices = Array.isArray(obj.devices) ? (obj.devices as StorageDevice[]) : [];
+
+  return {
+    devices,
+    debug: String(obj.debug ?? ""),
+    error: String(obj.error ?? ""),
+    ok: Boolean(obj.ok ?? devices.length > 0),
+    count: Number(obj.count ?? devices.length),
+  };
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
 function Content() {
   const [devices, setDevices] = useState<StorageDevice[]>([]);
   const [selectedPath, setSelectedPath] = useState("");
   const [label, setLabel] = useState("SteamLibrary");
   const [formatOnApply, setFormatOnApply] = useState(false);
   const [status, setStatus] = useState<StatusResult | null>(null);
-  const [output, setOutput] = useState("Select a storage device and configure.");
+  const [output, setOutput] = useState("Tap “Rescan all storage” to scan devices.");
   const [busy, setBusy] = useState(false);
+  const [scanState, setScanState] = useState<ScanUiState>("idle");
+  const [pluginVersion, setPluginVersion] = useState("");
 
   const dropdownOptions = useMemo(
     () =>
@@ -120,6 +173,21 @@ function Content() {
   );
 
   const selectedDevice = devices.find((d) => d.path === selectedPath);
+
+  const scanBanner = useMemo(() => {
+    switch (scanState) {
+      case "loading":
+        return "Scanning storage devices…";
+      case "ok":
+        return `Scan OK — ${devices.length} device(s) found`;
+      case "error":
+        return "Scan failed — see details below";
+      default:
+        return devices.length
+          ? `${devices.length} device(s) in list`
+          : "No devices loaded yet";
+    }
+  }, [scanState, devices.length]);
 
   const statusLines = useMemo(() => {
     if (!status) return ["Status not loaded yet."];
@@ -134,41 +202,76 @@ function Content() {
     ];
   }, [status, selectedPath]);
 
-  const refreshDevices = async () => {
+  const refreshDevices = useCallback(async (fromUser = false) => {
     setBusy(true);
+    setScanState("loading");
+    setOutput("Scanning…");
+
+    if (fromUser) {
+      toaster.toast({ title: "Scanning", body: "Looking for storage devices…" });
+    }
+
     try {
-      const scan = await listStorageDevices();
-      const list = scan.devices ?? [];
+      const raw = await listStorageDevices();
+      const scan = parseScanResult(raw);
+      const list = scan.devices;
+
       setDevices(list);
+
       if (list.length === 0) {
+        setScanState("error");
         const lines = [
           scan.error || "No storage devices found.",
           "",
-          scan.debug ? `debug: ${scan.debug}` : "",
-          "Tip: set label to NVMe1TB if that is your Steam library name.",
-        ].filter(Boolean);
+          scan.debug ? `Debug: ${scan.debug}` : "Debug: (empty)",
+          "",
+          "If NVMe1TB appears in Steam Settings, the label is likely NVMe1TB.",
+        ];
         setOutput(lines.join("\n"));
+        toaster.toast({
+          title: "No devices",
+          body: scan.error || "Scan returned an empty list",
+        });
         return;
       }
-      if (!selectedPath && list[0]) {
-        const first =
-          list.find((d) => d.is_system !== "true" && d.can_format === "true") ??
-          list.find((d) => d.label.toLowerCase() === "nvme1tb") ??
-          list[0];
-        setSelectedPath(first.path);
-        if (first.label && label === "SteamLibrary") {
-          setLabel(first.label);
+
+      setScanState("ok");
+
+      const preferred =
+        list.find((d) => d.label.toLowerCase() === "nvme1tb") ??
+        list.find((d) => d.is_system !== "true" && d.can_format === "true") ??
+        list[0];
+
+      if (preferred) {
+        setSelectedPath(preferred.path);
+        if (preferred.label) {
+          setLabel((current) =>
+            current === "SteamLibrary" || !current ? preferred.label : current
+          );
         }
       }
+
       setOutput(
-        `Found ${list.length} device(s).\n${scan.debug ? `debug: ${scan.debug}` : ""}`
+        [`Found ${list.length} device(s).`, scan.debug ? `Debug: ${scan.debug}` : ""]
+          .filter(Boolean)
+          .join("\n")
       );
+
+      toaster.toast({
+        title: "Scan complete",
+        body: `${list.length} device(s) found`,
+      });
     } catch (error) {
-      setOutput(`Device scan failed: ${String(error)}`);
+      const msg = errorMessage(error);
+      setScanState("error");
+      setDevices([]);
+      setOutput(`Scan failed:\n${msg}\n\nIs the plugin backend running?`);
+      toaster.toast({ title: "Scan error", body: msg });
+      console.error("[map-storage] scan failed", error);
     } finally {
       setBusy(false);
     }
-  };
+  }, []);
 
   const loadInitialConfig = async () => {
     try {
@@ -177,14 +280,34 @@ function Content() {
       if (cfg.label) setLabel(cfg.label);
       setFormatOnApply(!!cfg.format_on_apply);
     } catch (error) {
-      console.log("config load failed", error);
+      console.error("[map-storage] config load failed", error);
+      setOutput(`Config load failed: ${errorMessage(error)}`);
+      setScanState("error");
+    }
+  };
+
+  const checkBackend = async () => {
+    try {
+      const pong = await pingBackend();
+      if (pong?.version) setPluginVersion(pong.version);
+      if (pong?.status !== "ok") {
+        throw new Error("Backend ping failed");
+      }
+    } catch (error) {
+      const msg = errorMessage(error);
+      setScanState("error");
+      setOutput(`Backend not reachable:\n${msg}`);
+      toaster.toast({ title: "Backend error", body: msg });
     }
   };
 
   useEffect(() => {
-    void loadInitialConfig();
-    void refreshDevices();
-  }, []);
+    void (async () => {
+      await checkBackend();
+      await loadInitialConfig();
+      await refreshDevices(false);
+    })();
+  }, [refreshDevices]);
 
   const persistConfig = async () => {
     await saveConfig(selectedPath, label, formatOnApply);
@@ -196,6 +319,7 @@ function Content() {
       return;
     }
     setBusy(true);
+    setOutput("Checking status…");
     try {
       await persistConfig();
       const data = await getStatus(selectedPath, label);
@@ -205,8 +329,11 @@ function Content() {
           ? `Partition ${data.partition} · mount ${data.mount_target || "none"}`
           : "Partition not found for this label/device."
       );
+      toaster.toast({ title: "Status", body: data.partition ? "Found" : "Not found" });
     } catch (error) {
-      setOutput(`Status failed: ${String(error)}`);
+      const msg = errorMessage(error);
+      setOutput(`Status failed:\n${msg}`);
+      toaster.toast({ title: "Status error", body: msg });
     } finally {
       setBusy(false);
     }
@@ -225,18 +352,21 @@ function Content() {
       return;
     }
     setBusy(true);
+    setOutput("Formatting…");
     try {
       await persistConfig();
       const result = await formatStorage(selectedPath, label);
       setOutput(formatResult(result));
       toaster.toast({
         title: result.ok ? "Formatted" : "Format failed",
-        body: result.ok ? label : result.errors.join(", "),
+        body: result.ok ? label : result.errors.join(", ") || "Failed",
       });
-      await refreshDevices();
+      await refreshDevices(false);
       await loadStatus();
     } catch (error) {
-      setOutput(`Format failed: ${String(error)}`);
+      const msg = errorMessage(error);
+      setOutput(`Format failed:\n${msg}`);
+      toaster.toast({ title: "Format error", body: msg });
     } finally {
       setBusy(false);
     }
@@ -255,6 +385,7 @@ function Content() {
       return;
     }
     setBusy(true);
+    setOutput("Applying automount setup…");
     try {
       await persistConfig();
       const result = await applyStorageFix(
@@ -269,11 +400,13 @@ function Content() {
           ? formatOnApply
             ? "Formatted and automount enabled"
             : "Automount enabled (no format)"
-          : "See output",
+          : result.errors[0] || "See output",
       });
       await loadStatus();
     } catch (error) {
-      setOutput(`Setup failed: ${String(error)}`);
+      const msg = errorMessage(error);
+      setOutput(`Setup failed:\n${msg}`);
+      toaster.toast({ title: "Setup error", body: msg });
     } finally {
       setBusy(false);
     }
@@ -281,11 +414,15 @@ function Content() {
 
   const loadLogs = async () => {
     setBusy(true);
+    setOutput("Loading logs…");
     try {
       const logs = await getServiceLogs(120);
       setOutput(logs || "No service logs found.");
+      toaster.toast({ title: "Logs", body: "Loaded service logs" });
     } catch (error) {
-      setOutput(`Log read failed: ${String(error)}`);
+      const msg = errorMessage(error);
+      setOutput(`Log read failed:\n${msg}`);
+      toaster.toast({ title: "Log error", body: msg });
     } finally {
       setBusy(false);
     }
@@ -294,16 +431,54 @@ function Content() {
   return (
     <>
       <PanelSection title="Storage devices">
+        {pluginVersion ? (
+          <PanelSectionRow>
+            <div style={{ fontSize: "0.75em", opacity: 0.8 }}>
+              Plugin v{pluginVersion}
+            </div>
+          </PanelSectionRow>
+        ) : null}
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={refreshDevices} disabled={busy}>
-            Rescan all storage
+          <div
+            style={{
+              fontSize: "0.85em",
+              fontWeight: 600,
+              color: scanState === "error" ? "#ff6b6b" : undefined,
+            }}
+          >
+            {scanBanner}
+          </div>
+        </PanelSectionRow>
+        {busy ? (
+          <PanelSectionRow>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <Spinner />
+              <span style={{ fontSize: "0.85em" }}>Please wait…</span>
+            </div>
+          </PanelSectionRow>
+        ) : null}
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={() => void refreshDevices(true)}
+            disabled={busy}
+          >
+            {busy ? "Scanning…" : "Rescan all storage"}
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
           <Dropdown
-            rgOptions={dropdownOptions}
+            rgOptions={
+              dropdownOptions.length > 0
+                ? dropdownOptions
+                : [{ data: "", label: "(no devices — run Rescan)" }]
+            }
             selectedOption={selectedPath || null}
-            strDefaultLabel="Select disk or partition"
+            strDefaultLabel={
+              dropdownOptions.length > 0
+                ? "Select disk or partition"
+                : "No devices — tap Rescan"
+            }
             onChange={(opt) => {
               if (opt?.data) setSelectedPath(String(opt.data));
             }}
@@ -330,28 +505,28 @@ function Content() {
 
       <PanelSection title="Actions">
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={loadStatus} disabled={busy}>
+          <ButtonItem layout="below" onClick={() => void loadStatus()} disabled={busy}>
             Check status
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            onClick={runFormatOnly}
+            onClick={() => void runFormatOnly()}
             disabled={busy || !selectedPath}
           >
             Format only (destructive)
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={runFix} disabled={busy}>
+          <ButtonItem layout="below" onClick={() => void runFix()} disabled={busy}>
             {formatOnApply
               ? "Format + configure automount"
               : "Configure automount (no format)"}
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={loadLogs} disabled={busy}>
+          <ButtonItem layout="below" onClick={() => void loadLogs()} disabled={busy}>
             Show service logs
           </ButtonItem>
         </PanelSectionRow>

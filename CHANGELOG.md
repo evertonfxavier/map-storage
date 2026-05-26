@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-05-26
+
+### Fixed
+
+- Storage scan returns JSON string for reliable Decky frontend parsing (fixes empty dropdown).
+- Prioritize `/run/media/deck/*` and `findmnt` so mounted libraries (e.g. NVMe1TB) always appear.
+- Explicit PATH and tool resolution for `lsblk`/`findmnt`/`blkid` on SteamOS.
+
+### Added
+
+- Loading spinner, scan status banner, and toasts on every scan/action.
+- Backend `ping` health check on plugin open.
+- Scan debug output shown in UI when no devices are found.
+
 ## [0.1.2] - 2026-05-26
 
 ### Fixed
@@ -38,7 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial Map Storage plugin: storage setup UI, format toggle, automount fix for Steam Game Mode.
 - GitHub Actions CI and release workflow with downloadable ZIPs.
 
-[Unreleased]: https://github.com/evertonfxavier/map-storage/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/evertonfxavier/map-storage/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.3
 [0.1.2]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.2
 [0.1.1]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.1
 [0.1.0]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.0
