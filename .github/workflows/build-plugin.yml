@@ -20,8 +20,6 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -30,6 +28,8 @@ jobs:
           cache: pnpm
 
       - name: Build plugin ZIP
+        env:
+          CI: true
         run: bash scripts/ci-build-zip.sh
 
       - name: Upload plugin ZIP artifact
