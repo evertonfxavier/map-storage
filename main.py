@@ -16,8 +16,8 @@ CONFIG_PATH = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "config.json")
 LABEL_MAX_LEN = 16
 LABEL_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
-UDEV_RULE_TEMPLATE = """# map-storage automount for label "{label}"
-KERNEL!="nvme[0-9]*p[0-9]*", GOTO="map_storage_automount_end"
+UDEV_RULE_TEMPLATE = """# map-storage automount for label "{label}" (any block device)
+SUBSYSTEM!="block", GOTO="map_storage_automount_end"
 ENV{{ID_FS_USAGE}}!="filesystem", GOTO="map_storage_automount_end"
 ENV{{ID_FS_LABEL}}!="{label}", GOTO="map_storage_automount_end"
 
@@ -26,6 +26,28 @@ ACTION=="remove", RUN+="/bin/systemd-run --no-block --collect /usr/lib/hwsupport
 
 LABEL="map_storage_automount_end"
 """
+
+# Block devices we list / allow (disks and partitions)
+DEVICE_PATH_PATTERN = re.compile(
+    r"^/dev/(?:"
+    r"nvme\d+n\d+(?:p\d+)?|"           # NVMe
+    r"sd[a-z]+\d*|mmcblk\d+(?:p\d+)?|"  # USB/SATA/SD
+    r"vd[a-z]+\d*|hd[a-z]+\d*"           # VirtIO / legacy IDE
+    r")$"
+)
+
+SKIP_DEVICE_PREFIXES = (
+    "loop",
+    "ram",
+    "zram",
+    "sr",
+    "fd",
+    "dm-",
+    "md",
+    "nbd",
+    "rbd",
+)
+SKIP_DEVICE_TYPES = frozenset({"rom", "loop"})
 
 MOUNT_SCRIPT_TEMPLATE = """#!/bin/bash
 set -e
@@ -143,10 +165,31 @@ class Plugin:
             raise RuntimeError("invalid label characters")
         return label
 
-    def _validate_nvme_path(self, device_path: str) -> str:
+    def _validate_device_path(self, device_path: str) -> str:
         device_path = (device_path or "").strip()
-        if not re.match(r"^/dev/nvme\d+n\d+(p\d+)?$", device_path):
-            raise RuntimeError(f"invalid NVMe path: {device_path}")
+        if not DEVICE_PATH_PATTERN.match(device_path):
+            raise RuntimeError(f"unsupported or invalid device path: {device_path}")
+        return device_path
+
+    def _should_skip_block(self, name: str, entry_type: str) -> bool:
+        if entry_type in SKIP_DEVICE_TYPES:
+            return True
+        return any(name.startswith(prefix) for prefix in SKIP_DEVICE_PREFIXES)
+
+    def _is_partition_path(self, device_path: str) -> bool:
+        return bool(
+            re.search(
+                r"(?:nvme\d+n\d+p\d+|mmcblk\d+p\d+|(?:sd|vd|hd)[a-z]+\d+)$",
+                device_path,
+            )
+        )
+
+    def _disk_from_path(self, device_path: str) -> str:
+        device_path = self._validate_device_path(device_path)
+        if self._is_partition_path(device_path):
+            if "nvme" in device_path or "mmcblk" in device_path:
+                return re.sub(r"p\d+$", "", device_path)
+            return re.sub(r"\d+$", "", device_path)
         return device_path
 
     def _root_mount_sources(self) -> List[str]:
@@ -185,25 +228,40 @@ class Plugin:
                 flat.extend(self._flatten_lsblk([child]))
         return flat
 
-    async def list_nvme_devices(self) -> List[Dict[str, str]]:
+    async def list_storage_devices(self) -> List[Dict[str, str]]:
         result = self._run(
-            "lsblk -J -o NAME,PATH,SIZE,TYPE,FSTYPE,LABEL,MODEL,TRAN,MOUNTPOINT"
+            "lsblk -J -o NAME,PATH,SIZE,TYPE,FSTYPE,LABEL,MODEL,TRAN,MOUNTPOINT,HOTPLUG,RM,ROTA"
         )
         if not result.stdout.strip():
             return []
 
         payload = json.loads(result.stdout)
         entries: List[Dict[str, str]] = []
+        seen_paths: set[str] = set()
 
         for block in self._flatten_lsblk(payload.get("blockdevices", [])):
-            path = block.get("path") or ""
+            path = block.get("path") or f"/dev/{block.get('name', '')}"
             name = block.get("name") or ""
-            if not name.startswith("nvme"):
+            entry_type = block.get("type") or ""
+
+            if not name or entry_type not in ("disk", "part"):
                 continue
+            if self._should_skip_block(name, entry_type):
+                continue
+            if not DEVICE_PATH_PATTERN.match(path):
+                continue
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
 
             mountpoint = block.get("mountpoint") or ""
-            entry_type = block.get("type") or ""
             is_system = self._is_system_device(path, mountpoint)
+            tran = (block.get("tran") or "").lower() or "unknown"
+            hotplug = block.get("hotplug")
+            removable = block.get("rm")
+            transport_label = tran
+            if removable == "1" or hotplug == "1":
+                transport_label = f"{tran} (hotplug)"
 
             entries.append(
                 {
@@ -215,7 +273,8 @@ class Plugin:
                     "fstype": block.get("fstype") or "",
                     "label": block.get("label") or "",
                     "mountpoint": mountpoint,
-                    "model": block.get("model") or "",
+                    "model": (block.get("model") or "").strip(),
+                    "transport": transport_label,
                     "is_system": str(is_system).lower(),
                     "can_format": str(
                         entry_type in ("disk", "part") and not is_system
@@ -223,7 +282,18 @@ class Plugin:
                 }
             )
 
+        entries.sort(
+            key=lambda e: (
+                e.get("is_system") == "true",
+                e.get("transport", ""),
+                e.get("path", ""),
+            )
+        )
         return entries
+
+    async def list_nvme_devices(self) -> List[Dict[str, str]]:
+        """Backward-compatible alias."""
+        return await self.list_storage_devices()
 
     async def get_config(self) -> Dict[str, Any]:
         return self._load_config()
@@ -232,7 +302,7 @@ class Plugin:
         self, device_path: str, label: str, format_on_apply: bool
     ) -> Dict[str, Any]:
         config = {
-            "device_path": self._validate_nvme_path(device_path)
+            "device_path": self._validate_device_path(device_path)
             if device_path
             else "",
             "label": self._validate_label(label),
@@ -240,12 +310,6 @@ class Plugin:
         }
         self._save_config(config)
         return config
-
-    def _disk_from_path(self, device_path: str) -> str:
-        match = re.match(r"^(/dev/nvme\d+n\d+)", device_path)
-        if not match:
-            raise RuntimeError(f"cannot resolve disk for {device_path}")
-        return match.group(1)
 
     def _partition_after_format(self, disk_path: str, label: str) -> str:
         partition = self._run(f"blkid -L {shlex.quote(label)}").stdout.strip()
@@ -271,19 +335,19 @@ class Plugin:
         if by_label:
             return by_label
 
-        device_path = self._validate_nvme_path(device_path)
-        if re.search(r"p\d+$", device_path):
+        device_path = self._validate_device_path(device_path)
+        if self._is_partition_path(device_path):
             return device_path
 
         return self._partition_after_format(device_path, label)
 
-    async def format_nvme(self, device_path: str, label: str) -> Dict[str, object]:
+    async def format_storage(self, device_path: str, label: str) -> Dict[str, object]:
         logs: List[str] = []
         errors: List[str] = []
 
         try:
             label = self._validate_label(label)
-            device_path = self._validate_nvme_path(device_path)
+            device_path = self._validate_device_path(device_path)
 
             readonly_status = self._run("steamos-readonly status").stdout
             if "enabled" in readonly_status:
@@ -294,7 +358,6 @@ class Plugin:
             if self._is_system_device(device_path, ""):
                 raise RuntimeError("refusing to format a system device")
 
-            # Unmount anything on this NVMe controller disk
             result = self._run(
                 f"lsblk -ln -o PATH,MOUNTPOINT {shlex.quote(disk_path)}"
             )
@@ -304,7 +367,7 @@ class Plugin:
                     self._run(f"umount -lf {shlex.quote(parts[0])} || true")
                     logs.append(f"unmounted {parts[0]}")
 
-            is_partition = bool(re.search(r"p\d+$", device_path))
+            is_partition = self._is_partition_path(device_path)
 
             if is_partition:
                 target = device_path
@@ -337,8 +400,12 @@ class Plugin:
             }
         except Exception as error:
             errors.append(str(error))
-            decky.logger.exception("format_nvme failed")
+            decky.logger.exception("format_storage failed")
             return {"ok": False, "label": label, "logs": logs, "errors": errors}
+
+    async def format_nvme(self, device_path: str, label: str) -> Dict[str, object]:
+        """Backward-compatible alias."""
+        return await self.format_storage(device_path, label)
 
     def _disable_legacy_service(self, logs: List[str]) -> None:
         if os.path.isfile(LEGACY_SERVICE_PATH):
@@ -429,7 +496,7 @@ class Plugin:
         ]
         return "\n\n".join(chunk for chunk in chunks if chunk)
 
-    async def apply_nvme_fix(
+    async def apply_storage_fix(
         self, device_path: str, label: str, format_drive: bool
     ) -> Dict[str, object]:
         logs: List[str] = []
@@ -439,9 +506,9 @@ class Plugin:
         try:
             label = self._validate_label(label)
             if not device_path:
-                raise RuntimeError("select an NVMe device first")
+                raise RuntimeError("select a storage device first")
 
-            device_path = self._validate_nvme_path(device_path)
+            device_path = self._validate_device_path(device_path)
             self._save_config(
                 {
                     "device_path": device_path,
@@ -451,7 +518,7 @@ class Plugin:
             )
 
             if format_drive:
-                fmt = await self.format_nvme(device_path, label)
+                fmt = await self.format_storage(device_path, label)
                 logs.extend(fmt.get("logs", []))
                 if not fmt.get("ok"):
                     errors.extend(fmt.get("errors", []))
@@ -517,7 +584,7 @@ class Plugin:
             }
         except Exception as error:
             errors.append(str(error))
-            decky.logger.exception("apply_nvme_fix failed")
+            decky.logger.exception("apply_storage_fix failed")
             return {
                 "ok": False,
                 "label": label,
@@ -526,6 +593,12 @@ class Plugin:
                 "logs": logs,
                 "errors": errors,
             }
+
+    async def apply_nvme_fix(
+        self, device_path: str, label: str, format_drive: bool
+    ) -> Dict[str, object]:
+        """Backward-compatible alias."""
+        return await self.apply_storage_fix(device_path, label, format_drive)
 
     async def _main(self):
         decky.logger.info("map-storage backend loaded")

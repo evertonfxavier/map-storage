@@ -1,10 +1,10 @@
 # Map Storage
 
-[![Build plugin](https://github.com/evertonxavier/map-storage/actions/workflows/build-plugin.yml/badge.svg)](https://github.com/evertonxavier/map-storage/actions/workflows/build-plugin.yml)
+[![Build plugin](https://github.com/evertonfxavier/map-storage/actions/workflows/build-plugin.yml/badge.svg)](https://github.com/evertonfxavier/map-storage/actions/workflows/build-plugin.yml)
 
-Decky Loader plugin for **Steam Deck** that helps set up **any NVMe expansion drive** for Steam library storage:
+Decky Loader plugin for **Steam Deck** that helps set up **any plugged storage** for Steam library storage:
 
-- scan NVMe disks/partitions
+- scan disks/partitions (NVMe, USB, SD card, SATA, etc.)
 - optional **format** (ext4 + custom label)
 - **automount via udisks2** so Game Mode can discover the drive (same idea as manual fix scripts)
 - create `steamapps` layout and `libraryfolder.vdf` when needed
@@ -14,14 +14,14 @@ Decky Loader plugin for **Steam Deck** that helps set up **any NVMe expansion dr
 ## Prerequisites
 
 - [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) installed on your Steam Deck
-- An NVMe drive installed in the expansion slot (or compatible NVMe block device)
+- Any supported block device (NVMe, USB flash/HDD, microSD, SATA SSD, …)
 - This plugin requests **`_root`** — it writes udev/systemd files under `/etc` and `/usr/local/bin`
 
 ## Installation
 
 ### From GitHub Releases (recommended)
 
-1. Open **[Releases](https://github.com/evertonxavier/map-storage/releases)** and download the latest `map-storage-vX.Y.Z.zip`.
+1. Open **[Releases](https://github.com/evertonfxavier/map-storage/releases)** and download the latest `map-storage-vX.Y.Z.zip`.
 2. Copy the ZIP to your Steam Deck (USB, SSH, cloud, etc.).
 3. In **Game Mode**: Quick Access (⋯) → **Decky** → **Settings** (gear).
 4. Enable **Developer Mode**.
@@ -36,7 +36,7 @@ Install the newer ZIP over the existing plugin (same steps as install). No need 
 
 | Action | What it does |
 |--------|----------------|
-| **Rescan NVMe devices** | Lists all `nvme*` disks/partitions |
+| **Rescan all storage** | Lists connected disks/partitions (excludes loop/ram/system) |
 | **Filesystem label** | ext4 label used for mount + Steam library (max 16 chars) |
 | **Format before setup** | Wipes and creates partition/filesystem before automount |
 | **Configure automount (no format)** | Keeps existing data; sets udev + systemd + udisks mount |

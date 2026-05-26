@@ -5,7 +5,7 @@
   "api_version": 1,
   "publish": {
     "tags": ["storage", "nvme", "root"],
-    "description": "Setup any NVMe for Steam libraries with optional format and udisks2 automount.",
+    "description": "Setup any plugged storage (NVMe, USB, SD, SATA) for Steam libraries with optional format and udisks2 automount.",
     "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
   }
 }

@@ -1,7 +1,7 @@
 {
   "name": "map-storage",
-  "version": "0.1.0",
-  "description": "Decky plugin to setup NVMe storage on Steam Deck (optional format + udisks2 automount)",
+  "version": "0.1.1",
+  "description": "Decky plugin to setup any plugged storage on Steam Deck (optional format + udisks2 automount)",
   "type": "module",
   "packageManager": "pnpm@9.15.0",
   "scripts": {
@@ -13,7 +13,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/evertonxavier/map-storage.git"
+    "url": "git+https://github.com/evertonfxavier/map-storage.git"
   },
   "keywords": [
     "decky",
@@ -25,9 +25,9 @@
   "author": "Everton Xavier",
   "license": "BSD-3-Clause",
   "bugs": {
-    "url": "https://github.com/evertonxavier/map-storage/issues"
+    "url": "https://github.com/evertonfxavier/map-storage/issues"
   },
-  "homepage": "https://github.com/evertonxavier/map-storage#readme",
+  "homepage": "https://github.com/evertonfxavier/map-storage#readme",
   "devDependencies": {
     "@decky/rollup": "^1.0.2",
     "@decky/ui": "^4.11.4",

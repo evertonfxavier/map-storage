@@ -15,7 +15,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { FaHdd } from "react-icons/fa";
 
-type NvmeDevice = {
+type StorageDevice = {
   id: string;
   path: string;
   name: string;
@@ -25,6 +25,7 @@ type NvmeDevice = {
   label: string;
   mountpoint: string;
   model: string;
+  transport: string;
   is_system: string;
   can_format: string;
 };
@@ -60,26 +61,28 @@ type StatusResult = {
   configured_label: string;
 };
 
-const listNvmeDevices = callable<[], NvmeDevice[]>("list_nvme_devices");
+const listStorageDevices = callable<[], StorageDevice[]>("list_storage_devices");
 const getConfig = callable<[], PluginConfig>("get_config");
 const saveConfig = callable<
   [device_path: string, label: string, format_on_apply: boolean],
   PluginConfig
 >("save_config");
-const formatNvme = callable<[device_path: string, label: string], FixResult>(
-  "format_nvme"
+const formatStorage = callable<[device_path: string, label: string], FixResult>(
+  "format_storage"
 );
-const applyNvmeFix = callable<
+const applyStorageFix = callable<
   [device_path: string, label: string, format_drive: boolean],
   FixResult
->("apply_nvme_fix");
+>("apply_storage_fix");
 const getStatus = callable<[device_path: string, label: string], StatusResult>(
   "get_status"
 );
 const getServiceLogs = callable<[lines: number], string>("get_service_logs");
 
-function deviceLabel(dev: NvmeDevice): string {
+function deviceLabel(dev: StorageDevice): string {
   const meta = [
+    dev.transport !== "unknown" ? dev.transport : "",
+    dev.model,
     dev.size,
     dev.type,
     dev.fstype || "no-fs",
@@ -93,12 +96,12 @@ function deviceLabel(dev: NvmeDevice): string {
 }
 
 function Content() {
-  const [devices, setDevices] = useState<NvmeDevice[]>([]);
+  const [devices, setDevices] = useState<StorageDevice[]>([]);
   const [selectedPath, setSelectedPath] = useState("");
   const [label, setLabel] = useState("SteamLibrary");
   const [formatOnApply, setFormatOnApply] = useState(false);
   const [status, setStatus] = useState<StatusResult | null>(null);
-  const [output, setOutput] = useState("Select an NVMe drive and configure.");
+  const [output, setOutput] = useState("Select a storage device and configure.");
   const [busy, setBusy] = useState(false);
 
   const dropdownOptions = useMemo(
@@ -128,10 +131,10 @@ function Content() {
   const refreshDevices = async () => {
     setBusy(true);
     try {
-      const list = await listNvmeDevices();
+      const list = await listStorageDevices();
       setDevices(list);
       if (list.length === 0) {
-        setOutput("No NVMe devices found.");
+        setOutput("No storage devices found.");
         return;
       }
       if (!selectedPath && list[0]) {
@@ -140,7 +143,7 @@ function Content() {
           list[0];
         setSelectedPath(first.path);
       }
-      setOutput(`Found ${list.length} NVMe block device(s).`);
+      setOutput(`Found ${list.length} storage device(s).`);
     } catch (error) {
       setOutput(`Device scan failed: ${String(error)}`);
     } finally {
@@ -170,7 +173,7 @@ function Content() {
 
   const loadStatus = async () => {
     if (!selectedPath) {
-      toaster.toast({ title: "No device", body: "Select an NVMe drive first." });
+      toaster.toast({ title: "No device", body: "Select a storage device first." });
       return;
     }
     setBusy(true);
@@ -192,7 +195,7 @@ function Content() {
 
   const runFormatOnly = async () => {
     if (!selectedPath) {
-      toaster.toast({ title: "No device", body: "Select an NVMe drive first." });
+      toaster.toast({ title: "No device", body: "Select a storage device first." });
       return;
     }
     if (selectedDevice?.is_system === "true") {
@@ -205,7 +208,7 @@ function Content() {
     setBusy(true);
     try {
       await persistConfig();
-      const result = await formatNvme(selectedPath, label);
+      const result = await formatStorage(selectedPath, label);
       setOutput(formatResult(result));
       toaster.toast({
         title: result.ok ? "Formatted" : "Format failed",
@@ -222,7 +225,7 @@ function Content() {
 
   const runFix = async () => {
     if (!selectedPath) {
-      toaster.toast({ title: "No device", body: "Select an NVMe drive first." });
+      toaster.toast({ title: "No device", body: "Select a storage device first." });
       return;
     }
     if (formatOnApply && selectedDevice?.is_system === "true") {
@@ -235,7 +238,7 @@ function Content() {
     setBusy(true);
     try {
       await persistConfig();
-      const result = await applyNvmeFix(
+      const result = await applyStorageFix(
         selectedPath,
         label,
         formatOnApply
@@ -271,17 +274,17 @@ function Content() {
 
   return (
     <>
-      <PanelSection title="NVMe drive">
+      <PanelSection title="Storage devices">
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={refreshDevices} disabled={busy}>
-            Rescan NVMe devices
+            Rescan all storage
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
           <Dropdown
             rgOptions={dropdownOptions}
             selectedOption={selectedPath || null}
-            strDefaultLabel="Select NVMe disk/partition"
+            strDefaultLabel="Select disk or partition"
             onChange={(opt) => {
               if (opt?.data) setSelectedPath(String(opt.data));
             }}
