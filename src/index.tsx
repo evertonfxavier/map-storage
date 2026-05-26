@@ -15,6 +15,12 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { FaHdd } from "react-icons/fa";
 
+type StorageScanResult = {
+  devices: StorageDevice[];
+  debug: string;
+  error: string;
+};
+
 type StorageDevice = {
   id: string;
   path: string;
@@ -61,7 +67,7 @@ type StatusResult = {
   configured_label: string;
 };
 
-const listStorageDevices = callable<[], StorageDevice[]>("list_storage_devices");
+const listStorageDevices = callable<[], StorageScanResult>("list_storage_devices");
 const getConfig = callable<[], PluginConfig>("get_config");
 const saveConfig = callable<
   [device_path: string, label: string, format_on_apply: boolean],
@@ -131,19 +137,32 @@ function Content() {
   const refreshDevices = async () => {
     setBusy(true);
     try {
-      const list = await listStorageDevices();
+      const scan = await listStorageDevices();
+      const list = scan.devices ?? [];
       setDevices(list);
       if (list.length === 0) {
-        setOutput("No storage devices found.");
+        const lines = [
+          scan.error || "No storage devices found.",
+          "",
+          scan.debug ? `debug: ${scan.debug}` : "",
+          "Tip: set label to NVMe1TB if that is your Steam library name.",
+        ].filter(Boolean);
+        setOutput(lines.join("\n"));
         return;
       }
       if (!selectedPath && list[0]) {
         const first =
           list.find((d) => d.is_system !== "true" && d.can_format === "true") ??
+          list.find((d) => d.label.toLowerCase() === "nvme1tb") ??
           list[0];
         setSelectedPath(first.path);
+        if (first.label && label === "SteamLibrary") {
+          setLabel(first.label);
+        }
       }
-      setOutput(`Found ${list.length} storage device(s).`);
+      setOutput(
+        `Found ${list.length} device(s).\n${scan.debug ? `debug: ${scan.debug}` : ""}`
+      );
     } catch (error) {
       setOutput(`Device scan failed: ${String(error)}`);
     } finally {

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-05-26
+
+### Fixed
+
+- Storage scan on Steam Deck: fallback when `lsblk` columns fail; also discover drives via `findmnt` and `blkid` (e.g. `/run/media/deck/NVMe1TB`).
+- Devices mounted under `/run/media/` are no longer marked as system disks.
+- UI shows scan debug info when no devices are found; auto-suggests label `NVMe1TB` when detected.
+
 ## [0.1.1] - 2026-05-26
 
 ### Added
@@ -30,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial Map Storage plugin: storage setup UI, format toggle, automount fix for Steam Game Mode.
 - GitHub Actions CI and release workflow with downloadable ZIPs.
 
-[Unreleased]: https://github.com/evertonfxavier/map-storage/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/evertonfxavier/map-storage/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.2
 [0.1.1]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.1
 [0.1.0]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.0
