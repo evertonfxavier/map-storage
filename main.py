@@ -58,7 +58,7 @@ RETRY_DELAY=2
 DECK_USER="{deck_user}"
 
 for i in $(seq 1 $MAX_RETRIES); do
-    PARTITION=$(blkid -L "$LABEL" 2>/dev/null || echo "")
+    PARTITION=$(/usr/bin/blkid -L "$LABEL" 2>/dev/null || echo "")
 
     if [[ -z "$PARTITION" ]]; then
         echo "map-storage-mount[$i/$MAX_RETRIES]: partition not found, waiting..."
@@ -66,22 +66,22 @@ for i in $(seq 1 $MAX_RETRIES); do
         continue
     fi
 
-    if findmnt -no TARGET "$PARTITION" >/dev/null 2>&1; then
-        MOUNT_AT=$(findmnt -no TARGET "$PARTITION")
+    if /usr/bin/findmnt -no TARGET "$PARTITION" >/dev/null 2>&1; then
+        MOUNT_AT=$(/usr/bin/findmnt -no TARGET "$PARTITION")
         chown 1000:1000 "$MOUNT_AT" 2>/dev/null || true
         echo "map-storage-mount: already mounted at $MOUNT_AT"
         exit 0
     fi
 
-    if ! pidof udisksd >/dev/null 2>&1; then
+    if ! pidof udisksd >/dev/null 2>&1 && ! pgrep udisksd >/dev/null 2>&1; then
         echo "map-storage-mount[$i/$MAX_RETRIES]: udisksd not ready, waiting..."
         sleep $RETRY_DELAY
         continue
     fi
 
-    if sudo -u "$DECK_USER" udisksctl mount -b "$PARTITION" --no-user-interaction >/dev/null 2>&1; then
+    if runuser -u "$DECK_USER" -- /usr/bin/udisksctl mount -b "$PARTITION" --no-user-interaction >/dev/null 2>&1; then
         sleep 1
-        MOUNT_AT=$(findmnt -no TARGET "$PARTITION" 2>/dev/null || echo "")
+        MOUNT_AT=$(/usr/bin/findmnt -no TARGET "$PARTITION" 2>/dev/null || echo "")
         if [[ -n "$MOUNT_AT" ]]; then
             chown 1000:1000 "$MOUNT_AT" 2>/dev/null || true
             echo "map-storage-mount: mounted at $MOUNT_AT"
@@ -92,11 +92,11 @@ for i in $(seq 1 $MAX_RETRIES); do
     sleep $RETRY_DELAY
 done
 
-PARTITION=$(blkid -L "$LABEL" 2>/dev/null || echo "")
+PARTITION=$(/usr/bin/blkid -L "$LABEL" 2>/dev/null || echo "")
 if [[ -n "$PARTITION" ]]; then
     MOUNT_POINT="/run/media/$DECK_USER/$LABEL"
     mkdir -p "$MOUNT_POINT"
-    mount -o rw,noatime "$PARTITION" "$MOUNT_POINT"
+    /usr/bin/mount -o rw,noatime "$PARTITION" "$MOUNT_POINT"
     chown 1000:1000 "$MOUNT_POINT"
     chmod 755 "$MOUNT_POINT"
     echo "map-storage-mount: fallback mounted at $MOUNT_POINT"
@@ -137,24 +137,148 @@ class Plugin:
                 return candidate
         return name
 
-    def _run(self, command: str, check: bool = False) -> subprocess.CompletedProcess:
-        env = os.environ.copy()
-        env["PATH"] = self._PATH_ENV
-        decky.logger.info("exec: %s", command)
+    def _clean_env(self) -> Dict[str, str]:
+        """Avoid Decky-inherited LD_* breaking /bin/sh (symbol lookup errors)."""
+        env = {
+            "PATH": self._PATH_ENV,
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+        }
+        if os.getuid() == 0:
+            env["HOME"] = "/root"
+        else:
+            env["HOME"] = os.environ.get(
+                "HOME", getattr(decky, "DECKY_USER_HOME", "/home/deck")
+            )
+        return env
+
+    def _run_cli(
+        self, args: List[str], check: bool = False
+    ) -> subprocess.CompletedProcess:
+        decky.logger.info("exec argv: %s", args)
         try:
             result = subprocess.run(
-                command,
-                shell=True,
+                args,
                 text=True,
                 capture_output=True,
-                env=env,
+                env=self._clean_env(),
                 timeout=self._CMD_TIMEOUT_SEC,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"command timed out after {self._CMD_TIMEOUT_SEC}s") from exc
         if check and result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or command)
+            raise RuntimeError(
+                (result.stderr or result.stdout or " ".join(args)).strip()
+            )
         return result
+
+    def _run(self, command: str, check: bool = False) -> subprocess.CompletedProcess:
+        decky.logger.info("exec: %s", command)
+        return self._run_cli(["/bin/bash", "-c", command], check=check)
+
+    def _run_as_deck_user(self, command: str, deck_user: str) -> subprocess.CompletedProcess:
+        if os.getuid() == 0:
+            return self._run_cli(
+                ["/usr/bin/runuser", "-u", deck_user, "--", "/bin/bash", "-c", command]
+            )
+        return self._run(f"/usr/bin/sudo -u {shlex.quote(deck_user)} {command}")
+
+    def _blkid_field(self, device: str, field: str) -> str:
+        blkid = self._tool("blkid")
+        result = self._run_cli(
+            [blkid, f"-s", field.upper(), "-o", "value", device],
+        )
+        if result.returncode != 0:
+            return ""
+        return (result.stdout or "").strip()
+
+    def _findmnt_target(self, device: str) -> str:
+        findmnt = self._tool("findmnt")
+        result = self._run_cli([findmnt, "-no", "TARGET", device])
+        if result.returncode != 0:
+            return ""
+        return (result.stdout or "").strip()
+
+    def _lsblk_size(self, device: str) -> str:
+        lsblk = self._tool("lsblk")
+        result = self._run_cli([lsblk, "-no", "SIZE", device])
+        if result.returncode != 0:
+            return "?"
+        return (result.stdout or "").strip() or "?"
+
+    def _label_on_device(self, device_path: str) -> str:
+        return self._blkid_field(device_path, "LABEL")
+
+    def _storage_display_label(self, label: str, mountpoint: str) -> str:
+        """Name shown in Steam Settings (ext4 LABEL or /run/media/deck/<name>)."""
+        if label:
+            return label
+        mountpoint = (mountpoint or "").rstrip("/")
+        deck_prefix = f"/run/media/{getattr(decky, 'DECKY_USER', 'deck')}/"
+        if mountpoint.startswith(deck_prefix):
+            return os.path.basename(mountpoint)
+        if mountpoint.startswith("/run/media/"):
+            return os.path.basename(mountpoint)
+        return ""
+
+    def _enrich_device(self, path: str) -> Optional[Dict[str, str]]:
+        if not DEVICE_PATH_PATTERN.match(path):
+            return None
+        name = os.path.basename(path)
+        entry_type = "part" if self._is_partition_path(path) else "disk"
+        if self._should_skip_block(name, entry_type):
+            return None
+
+        label = self._label_on_device(path)
+        fstype = self._blkid_field(path, "TYPE")
+        mountpoint = self._findmnt_target(path)
+        size = self._lsblk_size(path)
+        is_system = self._is_system_device(path, mountpoint)
+
+        transport = "unmounted"
+        if mountpoint.lower().startswith("/run/media/"):
+            transport = "steam-library"
+        elif mountpoint:
+            transport = "mounted"
+
+        if fstype.lower() in ("crypto_luks",):
+            transport = "encrypted"
+
+        storage_label = self._storage_display_label(label, mountpoint)
+
+        return {
+            "id": path,
+            "path": path,
+            "name": name,
+            "size": size,
+            "type": entry_type,
+            "fstype": fstype or ("crypto_LUKS" if "encrypted" in transport else ""),
+            "label": label,
+            "storage_label": storage_label,
+            "mountpoint": mountpoint,
+            "model": "",
+            "transport": transport,
+            "is_system": str(is_system).lower(),
+            "can_format": str(entry_type in ("disk", "part") and not is_system).lower(),
+            "is_mounted": str(bool(mountpoint)).lower(),
+        }
+
+    def _mark_internal_nvme(self, entries: List[Dict[str, str]]) -> None:
+        """Steam Deck internal storage is usually nvme0n1; expansion is nvme1n1."""
+        for entry in entries:
+            path = entry.get("path", "")
+            if re.match(r"^/dev/nvme0n\d", path) and entry.get("transport") != "steam-library":
+                entry["is_system"] = "true"
+                entry["can_format"] = "false"
+                if not entry.get("transport"):
+                    entry["transport"] = "internal"
+
+    def _resolve_working_label(self, device_path: str, label: str) -> str:
+        device_path = self._validate_device_path(device_path)
+        on_device = self._label_on_device(device_path)
+        if on_device:
+            return self._validate_label(on_device)
+        return self._validate_label(label)
 
     def _write_file(self, path: str, content: str, mode: int = 0o644) -> None:
         with open(path, "w", encoding="utf-8") as file:
@@ -358,171 +482,109 @@ class Plugin:
         )
         return True
 
-    def _merge_findmnt_devices(
-        self, entries: List[Dict[str, str]], seen_paths: set[str], debug: List[str]
-    ) -> None:
-        """Add devices visible to Steam (e.g. /run/media/deck/NVMe1TB)."""
-        findmnt = self._tool("findmnt")
-        result = self._run(f"{findmnt} -rn -o SOURCE,TARGET,FSTYPE 2>/dev/null || true")
-        added = 0
-        for line in result.stdout.splitlines():
-            parts = line.split()
-            if len(parts) < 2:
-                continue
-            source, target = parts[0], parts[1]
-            fstype = parts[2] if len(parts) > 2 else ""
-            if not source.startswith("/dev/"):
-                continue
-            if not DEVICE_PATH_PATTERN.match(source):
-                continue
-            if source in seen_paths:
-                continue
+    def _discover_paths(self) -> Tuple[set[str], List[str]]:
+        """Collect block device paths, then enrich each via blkid/findmnt/lsblk."""
+        paths: set[str] = set()
+        notes: List[str] = []
 
-            blkid = self._tool("blkid")
-            label = self._run(
-                f"{blkid} -s LABEL -o value {shlex.quote(source)} 2>/dev/null || true"
-            ).stdout.strip()
-
-            if self._append_device(
-                entries, seen_paths, source, target, fstype, label, "findmnt"
-            ):
-                added += 1
-        if added:
-            debug.append(f"findmnt: +{added} mounted")
-
-    def _merge_run_media_mounts(
-        self, entries: List[Dict[str, str]], seen_paths: set[str], debug: List[str]
-    ) -> None:
-        """Steam library folders under /run/media/<user>/ (Game Mode)."""
         deck_user = getattr(decky, "DECKY_USER", "deck")
         media_root = f"/run/media/{deck_user}"
-        if not os.path.isdir(media_root):
-            debug.append(f"no {media_root}")
-            return
+        media_count = 0
+        if os.path.isdir(media_root):
+            findmnt = self._tool("findmnt")
+            for folder_name in sorted(os.listdir(media_root)):
+                mountpoint = os.path.join(media_root, folder_name)
+                if not os.path.isdir(mountpoint):
+                    continue
+                result = self._run_cli([findmnt, "-no", "SOURCE", mountpoint])
+                source = (result.stdout or "").strip()
+                if DEVICE_PATH_PATTERN.match(source):
+                    paths.add(source)
+                    media_count += 1
+        if media_count:
+            notes.append(f"run/media: {media_count}")
 
         findmnt = self._tool("findmnt")
-        blkid = self._tool("blkid")
-        added = 0
-        for folder_name in sorted(os.listdir(media_root)):
-            mountpoint = os.path.join(media_root, folder_name)
-            if not os.path.isdir(mountpoint):
+        result = self._run(f"{findmnt} -rn -o SOURCE,TARGET 2>/dev/null || true")
+        findmnt_count = 0
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if not parts:
                 continue
+            source = parts[0]
+            if DEVICE_PATH_PATTERN.match(source):
+                paths.add(source)
+                findmnt_count += 1
+        if findmnt_count:
+            notes.append(f"findmnt: {findmnt_count}")
 
-            source = self._run(
-                f"{findmnt} -no SOURCE {shlex.quote(mountpoint)} 2>/dev/null || true"
-            ).stdout.strip()
-            if not source.startswith("/dev/"):
-                debug.append(f"media:{folder_name} no block source")
-                continue
+        payload, lsblk_note = self._lsblk_payload()
+        notes.append(lsblk_note)
+        if payload:
+            for block in self._flatten_lsblk(payload.get("blockdevices", [])):
+                name = block.get("name") or ""
+                entry_type = block.get("type") or ""
+                path = self._block_path(name, block)
+                if entry_type in ("disk", "part") and DEVICE_PATH_PATTERN.match(path):
+                    if not self._should_skip_block(name, entry_type):
+                        paths.add(path)
 
-            label = self._run(
-                f"{blkid} -s LABEL -o value {shlex.quote(source)} 2>/dev/null || true"
-            ).stdout.strip()
-            if not label:
-                label = folder_name
-
-            fstype = self._run(
-                f"{blkid} -s TYPE -o value {shlex.quote(source)} 2>/dev/null || true"
-            ).stdout.strip()
-
-            if self._append_device(
-                entries,
-                seen_paths,
-                source,
-                mountpoint,
-                fstype,
-                label,
-                "steam-media",
-            ):
-                added += 1
-
-        if added:
-            debug.append(f"run/media: +{added}")
-
-    def _merge_blkid_devices(
-        self, entries: List[Dict[str, str]], seen_paths: set[str], debug: List[str]
-    ) -> None:
         blkid = self._tool("blkid")
         result = self._run(f"{blkid} -o device 2>/dev/null || true")
-        added = 0
+        blkid_count = 0
         for device in result.stdout.splitlines():
             device = device.strip()
-            if not device or device in seen_paths:
-                continue
             if not DEVICE_PATH_PATTERN.match(device):
                 continue
             name = os.path.basename(device)
             if self._should_skip_block(name, "part"):
                 continue
+            paths.add(device)
+            blkid_count += 1
+        if blkid_count:
+            notes.append(f"blkid: {blkid_count}")
 
-            label = self._run(
-                f"{blkid} -s LABEL -o value {shlex.quote(device)} 2>/dev/null || true"
-            ).stdout.strip()
-            fstype = self._run(
-                f"{blkid} -s TYPE -o value {shlex.quote(device)} 2>/dev/null || true"
-            ).stdout.strip()
-            findmnt = self._tool("findmnt")
-            mountpoint = self._run(
-                f"{findmnt} -no TARGET {shlex.quote(device)} 2>/dev/null || true"
-            ).stdout.strip()
-            if self._append_device(
-                entries, seen_paths, device, mountpoint, fstype, label, "blkid"
-            ):
-                added += 1
-        if added:
-            debug.append(f"blkid: +{added}")
-
-    def _merge_proc_partitions(
-        self, entries: List[Dict[str, str]], seen_paths: set[str], debug: List[str]
-    ) -> None:
         proc_path = "/proc/partitions"
-        if not os.path.isfile(proc_path):
-            return
-        added = 0
-        with open(proc_path, encoding="utf-8") as file:
-            lines = file.readlines()[2:]
-        for line in lines:
-            parts = line.split()
-            if len(parts) < 4:
-                continue
-            name = parts[-1]
-            if self._should_skip_block(name, "part"):
-                continue
-            path = f"/dev/{name}"
-            if path in seen_paths or not DEVICE_PATH_PATTERN.match(path):
-                continue
-            if self._append_device(entries, seen_paths, path, "", "", "", "proc"):
-                added += 1
-        if added:
-            debug.append(f"proc: +{added}")
+        proc_count = 0
+        if os.path.isfile(proc_path):
+            with open(proc_path, encoding="utf-8") as file:
+                for line in file.readlines()[2:]:
+                    parts = line.split()
+                    if len(parts) < 4:
+                        continue
+                    name = parts[-1]
+                    if self._should_skip_block(name, "part"):
+                        continue
+                    path = f"/dev/{name}"
+                    if DEVICE_PATH_PATTERN.match(path):
+                        paths.add(path)
+                        proc_count += 1
+        if proc_count:
+            notes.append(f"proc: {proc_count}")
+
+        return paths, notes
 
     def _build_scan_result(self) -> Dict[str, Any]:
         debug_notes: List[str] = []
-        entries: List[Dict[str, str]] = []
-        seen_paths: set[str] = set()
-
         debug_notes.append(f"plugin {getattr(decky, 'DECKY_PLUGIN_VERSION', '?')}")
         debug_notes.append(f"user {getattr(decky, 'DECKY_USER', '?')}")
 
-        # Order tuned for Steam Deck Game Mode (mounted libraries first)
-        self._merge_run_media_mounts(entries, seen_paths, debug_notes)
-        self._merge_findmnt_devices(entries, seen_paths, debug_notes)
+        paths, discover_notes = self._discover_paths()
+        debug_notes.extend(discover_notes)
 
-        payload, lsblk_note = self._lsblk_payload()
-        debug_notes.append(lsblk_note)
-        if payload:
-            for block in self._flatten_lsblk(payload.get("blockdevices", [])):
-                entry = self._entry_from_block(block, seen_paths)
-                if entry:
-                    entries.append(entry)
+        entries: List[Dict[str, str]] = []
+        for path in sorted(paths):
+            entry = self._enrich_device(path)
+            if entry:
+                entries.append(entry)
 
-        self._merge_blkid_devices(entries, seen_paths, debug_notes)
-        self._merge_proc_partitions(entries, seen_paths, debug_notes)
+        self._mark_internal_nvme(entries)
 
         entries.sort(
             key=lambda e: (
                 e.get("is_system") == "true",
-                e.get("transport", ""),
+                e.get("is_mounted") != "true",
+                e.get("transport") != "steam-library",
                 e.get("path", ""),
             )
         )
@@ -602,7 +664,8 @@ class Plugin:
         return config
 
     def _partition_after_format(self, disk_path: str, label: str) -> str:
-        partition = self._run(f"blkid -L {shlex.quote(label)}").stdout.strip()
+        blkid = self._tool("blkid")
+        partition = self._run_cli([blkid, "-L", label]).stdout.strip()
         if partition:
             return partition
 
@@ -621,15 +684,49 @@ class Plugin:
         raise RuntimeError("partition not found after format")
 
     def _resolve_target_partition(self, device_path: str, label: str) -> str:
-        by_label = self._run(f"blkid -L {shlex.quote(label)}").stdout.strip()
+        label = self._validate_label(label)
+        device_path = self._validate_device_path(device_path)
+
+        blkid = self._tool("blkid")
+        by_label = self._run_cli([blkid, "-L", label]).stdout.strip()
         if by_label:
             return by_label
 
-        device_path = self._validate_device_path(device_path)
         if self._is_partition_path(device_path):
             return device_path
 
         return self._partition_after_format(device_path, label)
+
+    def _try_mount_as_deck(
+        self, partition: str, deck_user: str, logs: List[str]
+    ) -> str:
+        udisksctl = self._tool("udisksctl")
+        if os.getuid() == 0:
+            result = self._run_cli(
+                [
+                    "/usr/bin/runuser",
+                    "-u",
+                    deck_user,
+                    "--",
+                    udisksctl,
+                    "mount",
+                    "-b",
+                    partition,
+                    "--no-user-interaction",
+                ]
+            )
+        else:
+            result = self._run(
+                f"/usr/bin/sudo -u {shlex.quote(deck_user)} "
+                f"{udisksctl} mount -b {shlex.quote(partition)} --no-user-interaction"
+            )
+        if result.returncode == 0:
+            logs.append("mounted via udisksctl")
+            return self._findmnt_target(partition)
+        detail = (result.stderr or result.stdout or "").strip()
+        if detail:
+            logs.append(f"udisksctl mount: {detail}")
+        return ""
 
     async def format_storage(self, device_path: str, label: str) -> Dict[str, object]:
         logs: List[str] = []
@@ -639,9 +736,11 @@ class Plugin:
             label = self._validate_label(label)
             device_path = self._validate_device_path(device_path)
 
-            readonly_status = self._run("steamos-readonly status").stdout
-            if "enabled" in readonly_status:
-                self._run("steamos-readonly disable", check=True)
+            readonly = self._run_cli([self._tool("steamos-readonly"), "status"])
+            if "enabled" in (readonly.stdout or ""):
+                self._run_cli(
+                    [self._tool("steamos-readonly"), "disable"], check=True
+                )
                 logs.append("disabled steamos readonly mode")
 
             disk_path = self._disk_from_path(device_path)
@@ -680,7 +779,9 @@ class Plugin:
                 )
                 logs.append(f"formatted {target}")
 
-            partition = self._run(f"blkid -L {shlex.quote(label)}").stdout.strip()
+            partition = self._run_cli(
+                [self._tool("blkid"), "-L", label]
+            ).stdout.strip()
             return {
                 "ok": True,
                 "label": label,
@@ -698,9 +799,10 @@ class Plugin:
         return await self.format_storage(device_path, label)
 
     def _disable_legacy_service(self, logs: List[str]) -> None:
+        systemctl = self._tool("systemctl")
         if os.path.isfile(LEGACY_SERVICE_PATH):
-            self._run("systemctl disable mount-nvme1tb.service || true")
-            self._run("systemctl stop mount-nvme1tb.service || true")
+            self._run_cli([systemctl, "disable", "mount-nvme1tb.service"])
+            self._run_cli([systemctl, "stop", "mount-nvme1tb.service"])
             logs.append("disabled legacy mount-nvme1tb.service")
 
     def _ensure_steam_layout(self, mount_at: str, label: str, logs: List[str]) -> None:
@@ -735,32 +837,53 @@ class Plugin:
     async def get_status(
         self, device_path: str = "", label: str = "SteamLibrary"
     ) -> Dict[str, str]:
-        label = self._validate_label(label)
-        partition = self._run(f"blkid -L {shlex.quote(label)}").stdout.strip()
+        working_label = label
+        if device_path:
+            try:
+                working_label = self._resolve_working_label(device_path, label)
+            except Exception:
+                working_label = self._validate_label(label)
+        else:
+            working_label = self._validate_label(label)
 
+        partition = ""
+        if device_path:
+            try:
+                device_path = self._validate_device_path(device_path)
+                if self._is_partition_path(device_path):
+                    partition = device_path
+            except Exception:
+                device_path = ""
+
+        if not partition:
+            partition = self._run_cli(
+                [self._tool("blkid"), "-L", working_label]
+            ).stdout.strip()
         if not partition and device_path:
             try:
-                partition = self._resolve_target_partition(device_path, label)
+                partition = self._resolve_target_partition(device_path, working_label)
             except Exception:
                 partition = ""
 
-        mount_target = ""
-        if partition:
-            mount_target = self._run(
-                f"findmnt -no TARGET {shlex.quote(partition)}"
-            ).stdout.strip()
+        mount_target = self._findmnt_target(partition) if partition else ""
+        on_disk_label = self._label_on_device(partition) if partition else ""
+        storage_label = self._storage_display_label(on_disk_label, mount_target)
 
-        readonly = self._run("steamos-readonly status").stdout.strip()
-        service_enabled = self._run(
-            "systemctl is-enabled map-storage-automount.service"
+        readonly = self._run_cli(
+            [self._tool("steamos-readonly"), "status"]
         ).stdout.strip()
-        service_active = self._run(
-            "systemctl is-active map-storage-automount.service"
+        systemctl = self._tool("systemctl")
+        service_enabled = self._run_cli(
+            [systemctl, "is-enabled", "map-storage-automount.service"]
+        ).stdout.strip()
+        service_active = self._run_cli(
+            [systemctl, "is-active", "map-storage-automount.service"]
         ).stdout.strip()
 
         return {
             "device_path": device_path,
-            "label": label,
+            "label": working_label,
+            "storage_label": storage_label or working_label,
             "partition": partition,
             "mount_target": mount_target,
             "readonly_status": readonly or "unknown",
@@ -769,7 +892,7 @@ class Plugin:
             "has_udev_rule": str(os.path.isfile(UDEV_RULE_PATH)).lower(),
             "has_mount_script": str(os.path.isfile(MOUNT_SCRIPT_PATH)).lower(),
             "has_service_file": str(os.path.isfile(SERVICE_PATH)).lower(),
-            "configured_label": self._load_config().get("label", label),
+            "configured_label": self._load_config().get("label", working_label),
         }
 
     async def get_service_logs(self, lines: int = 80) -> str:
@@ -794,11 +917,34 @@ class Plugin:
         deck_user = getattr(decky, "DECKY_USER", "deck")
 
         try:
-            label = self._validate_label(label)
             if not device_path:
                 raise RuntimeError("select a storage device first")
 
             device_path = self._validate_device_path(device_path)
+
+            if not format_drive and not self._is_partition_path(device_path):
+                raise RuntimeError(
+                    "select a partition (e.g. /dev/nvme1n1p1), not the whole disk. "
+                    "Enable format to partition the disk, or pick the partition that "
+                    "has your Steam library (often labeled NVMe1TB)."
+                )
+
+            if not format_drive:
+                label = self._resolve_working_label(device_path, label)
+            else:
+                label = self._validate_label(label)
+
+            on_device = self._label_on_device(device_path)
+            if (
+                not format_drive
+                and self._is_partition_path(device_path)
+                and not on_device
+            ):
+                raise RuntimeError(
+                    "selected partition has no filesystem. "
+                    "Enable format or pick a formatted partition."
+                )
+
             self._save_config(
                 {
                     "device_path": device_path,
@@ -816,9 +962,11 @@ class Plugin:
                         errors[-1] if errors else "format failed"
                     )
 
-            readonly_status = self._run("steamos-readonly status").stdout
-            if "enabled" in readonly_status:
-                self._run("steamos-readonly disable", check=True)
+            readonly = self._run_cli([self._tool("steamos-readonly"), "status"])
+            if "enabled" in (readonly.stdout or ""):
+                self._run_cli(
+                    [self._tool("steamos-readonly"), "disable"], check=True
+                )
                 logs.append("disabled steamos readonly mode")
 
             partition = self._resolve_target_partition(device_path, label)
@@ -846,16 +994,25 @@ class Plugin:
             self._write_file(SERVICE_PATH, service_content)
             logs.append(f"wrote systemd service: {SERVICE_PATH}")
 
-            self._run("udevadm control --reload-rules || true")
-            self._run("udevadm trigger || true")
-            self._run("systemctl daemon-reload", check=True)
-            self._run("systemctl enable map-storage-automount.service", check=True)
-            self._run("systemctl restart map-storage-automount.service", check=True)
+            udevadm = self._tool("udevadm")
+            self._run_cli([udevadm, "control", "--reload-rules"])
+            self._run_cli([udevadm, "trigger"])
+            systemctl = self._tool("systemctl")
+            self._run_cli([systemctl, "daemon-reload"], check=True)
+            self._run_cli(
+                [systemctl, "enable", "map-storage-automount.service"], check=True
+            )
+            self._run_cli(
+                [systemctl, "restart", "map-storage-automount.service"], check=True
+            )
             logs.append("enabled and restarted map-storage-automount.service")
 
-            mount_target = self._run(
-                f"findmnt -no TARGET {shlex.quote(partition)}"
-            ).stdout.strip()
+            mount_target = self._findmnt_target(partition)
+            if not mount_target:
+                mount_target = self._try_mount_as_deck(partition, deck_user, logs)
+            if not mount_target:
+                self._run_cli([systemctl, "start", "map-storage-automount.service"])
+                mount_target = self._findmnt_target(partition)
             if mount_target:
                 self._ensure_steam_layout(mount_target, label, logs)
                 logs.append(f"mounted at: {mount_target}")

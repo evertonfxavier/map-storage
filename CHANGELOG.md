@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-05-26
+
+### Fixed
+
+- Subprocess runs with a clean environment and `/bin/bash -c` to avoid `/bin/sh: symbol lookup error` on SteamOS.
+- Storage scan enriches every device via `blkid`, `findmnt`, and `lsblk` (no more bare `proc · ? · no-fs` entries).
+- Automount uses `runuser` and full paths (`/usr/bin/udisksctl`, etc.) instead of `sudo` in the mount script.
+- `apply_storage_fix` requires a partition (not whole disk) unless formatting; uses the partition’s real ext4 label (e.g. `NVMe1TB`).
+- Status and setup resolve label from the selected partition when the text field still says `SteamLibrary`.
+- Attempts immediate `udisksctl` mount after configuring the systemd service.
+
+### Changed
+
+- Internal `nvme0n1` devices are marked SYSTEM; auto-select prefers mounted `nvme1` / Steam library partitions.
+- UI syncs label when changing device; blocks whole-disk configure without format.
+- Storage label shown in device list, selection summary, and status (filesystem LABEL or Steam library folder name).
+
 ## [0.1.3] - 2026-05-26
 
 ### Fixed
@@ -52,7 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial Map Storage plugin: storage setup UI, format toggle, automount fix for Steam Game Mode.
 - GitHub Actions CI and release workflow with downloadable ZIPs.
 
-[Unreleased]: https://github.com/evertonfxavier/map-storage/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/evertonfxavier/map-storage/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.4
 [0.1.3]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.3
 [0.1.2]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.2
 [0.1.1]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.1

@@ -32,11 +32,13 @@ type StorageDevice = {
   type: string;
   fstype: string;
   label: string;
+  storage_label?: string;
   mountpoint: string;
   model: string;
   transport: string;
   is_system: string;
   can_format: string;
+  is_mounted?: string;
 };
 
 type PluginConfig = {
@@ -68,6 +70,7 @@ type StatusResult = {
   has_mount_script: string;
   has_service_file: string;
   configured_label: string;
+  storage_label?: string;
 };
 
 type ScanUiState = "idle" | "loading" | "ok" | "error";
@@ -91,20 +94,47 @@ const getStatus = callable<[device_path: string, label: string], StatusResult>(
 );
 const getServiceLogs = callable<[lines: number], string>("get_service_logs");
 
+function storageLabelOf(dev: StorageDevice | undefined): string {
+  if (!dev) return "";
+  return (dev.storage_label || dev.label || "").trim();
+}
+
 function deviceLabel(dev: StorageDevice): string {
+  const name = storageLabelOf(dev);
   const meta = [
-    dev.transport,
-    dev.model,
     dev.size,
-    dev.type,
     dev.fstype || "no-fs",
-    dev.label ? `label:${dev.label}` : "",
-    dev.mountpoint ? `mount:${dev.mountpoint}` : "",
+    dev.is_mounted === "true" || dev.mountpoint ? "mounted" : "unmounted",
+    dev.transport === "encrypted" ? "encrypted" : "",
+    dev.type,
     dev.is_system === "true" ? "SYSTEM" : "",
   ]
     .filter(Boolean)
     .join(" · ");
-  return `${dev.path} (${meta})`;
+  if (name) {
+    return `${name} — ${dev.path} (${meta})`;
+  }
+  return `${dev.path} (no label · ${meta})`;
+}
+
+function pickPreferredDevice(list: StorageDevice[]): StorageDevice | undefined {
+  return (
+    list.find((d) => d.transport === "steam-library" && d.type === "part") ??
+    list.find((d) => d.mountpoint && d.label && d.type === "part") ??
+    list.find((d) => /nvme1n1/.test(d.path) && d.type === "part" && d.label) ??
+    list.find(
+      (d) => storageLabelOf(d).toLowerCase() === "nvme1tb"
+    ) ??
+    list.find(
+      (d) =>
+        d.is_system !== "true" &&
+        d.type === "part" &&
+        (d.is_mounted === "true" || !!d.mountpoint)
+    ) ??
+    list.find((d) => d.is_system !== "true" && d.type === "part") ??
+    list.find((d) => d.is_system !== "true") ??
+    list[0]
+  );
 }
 
 function parseScanResult(raw: unknown): StorageScanResult {
@@ -173,6 +203,30 @@ function Content() {
   );
 
   const selectedDevice = devices.find((d) => d.path === selectedPath);
+  const selectedStorageLabel = storageLabelOf(selectedDevice) || label;
+
+  const selectedSummary = useMemo(() => {
+    if (!selectedPath) {
+      return "No device selected — run Rescan and pick a partition.";
+    }
+    const dev = selectedDevice;
+    const storageName = storageLabelOf(dev) || "(no label detected)";
+    const lines = [
+      `Storage label: ${storageName}`,
+      `Device: ${selectedPath}`,
+    ];
+    if (dev) {
+      lines.push(
+        `Size: ${dev.size}`,
+        `Filesystem: ${dev.fstype || "unknown"}`,
+        dev.mountpoint ? `Mount: ${dev.mountpoint}` : "Mount: not mounted"
+      );
+      if (dev.label && dev.storage_label && dev.label !== dev.storage_label) {
+        lines.push(`Filesystem LABEL: ${dev.label}`);
+      }
+    }
+    return lines.join("\n");
+  }, [selectedPath, selectedDevice]);
 
   const scanBanner = useMemo(() => {
     switch (scanState) {
@@ -190,19 +244,31 @@ function Content() {
   }, [scanState, devices.length]);
 
   const statusLines = useMemo(() => {
-    if (!status) return ["Status not loaded yet."];
+    if (!status) {
+      if (selectedPath) {
+        return [
+          `storage label: ${selectedStorageLabel || "(none)"}`,
+          `device: ${selectedPath}`,
+          "Tap “Check status” for mount and service details.",
+        ];
+      }
+      return ["Status not loaded yet."];
+    }
+    const displayLabel =
+      status.storage_label || status.label || selectedStorageLabel || "(none)";
     return [
+      `storage label: ${displayLabel}`,
       `device: ${status.device_path || selectedPath || "none"}`,
-      `label: ${status.label}`,
+      `configured label: ${status.label}`,
       `partition: ${status.partition || "not found"}`,
       `mount: ${status.mount_target || "not mounted"}`,
       `readonly: ${status.readonly_status}`,
       `service: ${status.service_active} (${status.service_enabled})`,
       `udev: ${status.has_udev_rule} · script: ${status.has_mount_script}`,
     ];
-  }, [status, selectedPath]);
+  }, [status, selectedPath, selectedStorageLabel]);
 
-  const refreshDevices = useCallback(async (fromUser = false) => {
+  const refreshDevices = useCallback(async (fromUser = false, savedPath = "") => {
     setBusy(true);
     setScanState("loading");
     setOutput("Scanning…");
@@ -237,17 +303,17 @@ function Content() {
 
       setScanState("ok");
 
-      const preferred =
-        list.find((d) => d.label.toLowerCase() === "nvme1tb") ??
-        list.find((d) => d.is_system !== "true" && d.can_format === "true") ??
-        list[0];
+      const keepPath = savedPath || selectedPath;
+      const stillValid = list.find((d) => d.path === keepPath);
+      const preferred = stillValid ?? pickPreferredDevice(list);
 
       if (preferred) {
         setSelectedPath(preferred.path);
-        if (preferred.label) {
-          setLabel((current) =>
-            current === "SteamLibrary" || !current ? preferred.label : current
-          );
+        const detected = storageLabelOf(preferred);
+        if (detected) {
+          setLabel(detected);
+        } else if (preferred.label) {
+          setLabel(preferred.label);
         }
       }
 
@@ -271,20 +337,7 @@ function Content() {
     } finally {
       setBusy(false);
     }
-  }, []);
-
-  const loadInitialConfig = async () => {
-    try {
-      const cfg = await getConfig();
-      if (cfg.device_path) setSelectedPath(cfg.device_path);
-      if (cfg.label) setLabel(cfg.label);
-      setFormatOnApply(!!cfg.format_on_apply);
-    } catch (error) {
-      console.error("[map-storage] config load failed", error);
-      setOutput(`Config load failed: ${errorMessage(error)}`);
-      setScanState("error");
-    }
-  };
+  }, [selectedPath]);
 
   const checkBackend = async () => {
     try {
@@ -304,8 +357,19 @@ function Content() {
   useEffect(() => {
     void (async () => {
       await checkBackend();
-      await loadInitialConfig();
-      await refreshDevices(false);
+      let savedPath = "";
+      try {
+        const cfg = await getConfig();
+        if (cfg.device_path) {
+          savedPath = cfg.device_path;
+          setSelectedPath(cfg.device_path);
+        }
+        if (cfg.label) setLabel(cfg.label);
+        setFormatOnApply(!!cfg.format_on_apply);
+      } catch (error) {
+        console.error("[map-storage] config load failed", error);
+      }
+      await refreshDevices(false, savedPath);
     })();
   }, [refreshDevices]);
 
@@ -381,6 +445,20 @@ function Content() {
       toaster.toast({
         title: "Blocked",
         body: "Cannot format a system device.",
+      });
+      return;
+    }
+    if (!formatOnApply && selectedDevice?.type === "disk") {
+      toaster.toast({
+        title: "Select a partition",
+        body: "Pick a partition (e.g. nvme1n1p1), not the whole disk.",
+      });
+      return;
+    }
+    if (selectedDevice?.transport === "encrypted") {
+      toaster.toast({
+        title: "Encrypted volume",
+        body: "Unlock the drive in Desktop Mode first.",
       });
       return;
     }
@@ -480,14 +558,38 @@ function Content() {
                 : "No devices — tap Rescan"
             }
             onChange={(opt) => {
-              if (opt?.data) setSelectedPath(String(opt.data));
+              const path = String(opt?.data ?? "");
+              if (!path) return;
+              setSelectedPath(path);
+              const dev = devices.find((d) => d.path === path);
+              const detected = storageLabelOf(dev);
+              if (detected) setLabel(detected);
+              else if (dev?.label) setLabel(dev.label);
             }}
             disabled={busy || dropdownOptions.length === 0}
           />
         </PanelSectionRow>
+        {selectedPath ? (
+          <PanelSectionRow>
+            <div
+              style={{
+                fontSize: "0.8em",
+                whiteSpace: "pre-wrap",
+                width: "100%",
+                opacity: 0.95,
+              }}
+            >
+              {selectedSummary}
+            </div>
+          </PanelSectionRow>
+        ) : null}
         <PanelSectionRow>
           <TextField
-            label="Filesystem label (ext4, max 16 chars)"
+            label={
+              selectedStorageLabel
+                ? `Filesystem label (detected: ${selectedStorageLabel})`
+                : "Filesystem label (ext4, max 16 chars)"
+            }
             value={label}
             onChange={(e) => setLabel(e.target.value)}
             disabled={busy}
