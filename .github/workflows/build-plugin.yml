@@ -1,0 +1,57 @@
+name: Build plugin
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Build plugin ZIP
+        run: bash scripts/ci-build-zip.sh
+
+      - name: Upload plugin ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: map-storage-plugin-zip
+          path: |
+            out/*.zip
+          if-no-files-found: error
+
+      - name: Upload extracted plugin (smoke layout)
+        run: |
+          PLUGIN_ZIP=$(ls -1 out/map-storage-v*.zip | head -1)
+          mkdir -p out/extracted
+          unzip -q "$PLUGIN_ZIP" -d out/extracted
+          find out/extracted -path '*/dist/index.js' | grep -q .
+          find out/extracted -name plugin.json | grep -q .
+          find out/extracted -name main.py | grep -q .
+
+      - name: Upload extracted folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: map-storage-plugin
+          path: out/extracted/
+          if-no-files-found: error

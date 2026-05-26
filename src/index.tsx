@@ -1,115 +1,381 @@
 import {
   ButtonItem,
+  Dropdown,
   PanelSection,
   PanelSectionRow,
-  Navigation,
-  staticClasses
+  staticClasses,
+  TextField,
+  ToggleField,
 } from "@decky/ui";
 import {
-  addEventListener,
-  removeEventListener,
   callable,
   definePlugin,
   toaster,
-  // routerHook
-} from "@decky/api"
-import { useState } from "react";
-import { FaShip } from "react-icons/fa";
+} from "@decky/api";
+import { useEffect, useMemo, useState } from "react";
+import { FaHdd } from "react-icons/fa";
 
-// import logo from "../assets/logo.png";
+type NvmeDevice = {
+  id: string;
+  path: string;
+  name: string;
+  size: string;
+  type: string;
+  fstype: string;
+  label: string;
+  mountpoint: string;
+  model: string;
+  is_system: string;
+  can_format: string;
+};
 
-// This function calls the python function "add", which takes in two numbers and returns their sum (as a number)
-// Note the type annotations:
-//  the first one: [first: number, second: number] is for the arguments
-//  the second one: number is for the return value
-const add = callable<[first: number, second: number], number>("add");
+type PluginConfig = {
+  device_path: string;
+  label: string;
+  format_on_apply: boolean;
+};
 
-// This function calls the python function "start_timer", which takes in no arguments and returns nothing.
-// It starts a (python) timer which eventually emits the event 'timer_event'
-const startTimer = callable<[], void>("start_timer");
+type FixResult = {
+  ok: boolean;
+  label: string;
+  device_path?: string;
+  partition?: string;
+  mount_target?: string;
+  formatted?: boolean;
+  logs: string[];
+  errors: string[];
+};
+
+type StatusResult = {
+  device_path: string;
+  label: string;
+  partition: string;
+  mount_target: string;
+  readonly_status: string;
+  service_enabled: string;
+  service_active: string;
+  has_udev_rule: string;
+  has_mount_script: string;
+  has_service_file: string;
+  configured_label: string;
+};
+
+const listNvmeDevices = callable<[], NvmeDevice[]>("list_nvme_devices");
+const getConfig = callable<[], PluginConfig>("get_config");
+const saveConfig = callable<
+  [device_path: string, label: string, format_on_apply: boolean],
+  PluginConfig
+>("save_config");
+const formatNvme = callable<[device_path: string, label: string], FixResult>(
+  "format_nvme"
+);
+const applyNvmeFix = callable<
+  [device_path: string, label: string, format_drive: boolean],
+  FixResult
+>("apply_nvme_fix");
+const getStatus = callable<[device_path: string, label: string], StatusResult>(
+  "get_status"
+);
+const getServiceLogs = callable<[lines: number], string>("get_service_logs");
+
+function deviceLabel(dev: NvmeDevice): string {
+  const meta = [
+    dev.size,
+    dev.type,
+    dev.fstype || "no-fs",
+    dev.label ? `label:${dev.label}` : "",
+    dev.mountpoint ? `mount:${dev.mountpoint}` : "",
+    dev.is_system === "true" ? "SYSTEM" : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return `${dev.path} (${meta})`;
+}
 
 function Content() {
-  const [result, setResult] = useState<number | undefined>();
+  const [devices, setDevices] = useState<NvmeDevice[]>([]);
+  const [selectedPath, setSelectedPath] = useState("");
+  const [label, setLabel] = useState("SteamLibrary");
+  const [formatOnApply, setFormatOnApply] = useState(false);
+  const [status, setStatus] = useState<StatusResult | null>(null);
+  const [output, setOutput] = useState("Select an NVMe drive and configure.");
+  const [busy, setBusy] = useState(false);
 
-  const onClick = async () => {
-    const result = await add(Math.random(), Math.random());
-    setResult(result);
+  const dropdownOptions = useMemo(
+    () =>
+      devices.map((dev) => ({
+        data: dev.path,
+        label: deviceLabel(dev),
+      })),
+    [devices]
+  );
+
+  const selectedDevice = devices.find((d) => d.path === selectedPath);
+
+  const statusLines = useMemo(() => {
+    if (!status) return ["Status not loaded yet."];
+    return [
+      `device: ${status.device_path || selectedPath || "none"}`,
+      `label: ${status.label}`,
+      `partition: ${status.partition || "not found"}`,
+      `mount: ${status.mount_target || "not mounted"}`,
+      `readonly: ${status.readonly_status}`,
+      `service: ${status.service_active} (${status.service_enabled})`,
+      `udev: ${status.has_udev_rule} · script: ${status.has_mount_script}`,
+    ];
+  }, [status, selectedPath]);
+
+  const refreshDevices = async () => {
+    setBusy(true);
+    try {
+      const list = await listNvmeDevices();
+      setDevices(list);
+      if (list.length === 0) {
+        setOutput("No NVMe devices found.");
+        return;
+      }
+      if (!selectedPath && list[0]) {
+        const first =
+          list.find((d) => d.is_system !== "true" && d.can_format === "true") ??
+          list[0];
+        setSelectedPath(first.path);
+      }
+      setOutput(`Found ${list.length} NVMe block device(s).`);
+    } catch (error) {
+      setOutput(`Device scan failed: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const loadInitialConfig = async () => {
+    try {
+      const cfg = await getConfig();
+      if (cfg.device_path) setSelectedPath(cfg.device_path);
+      if (cfg.label) setLabel(cfg.label);
+      setFormatOnApply(!!cfg.format_on_apply);
+    } catch (error) {
+      console.log("config load failed", error);
+    }
+  };
+
+  useEffect(() => {
+    void loadInitialConfig();
+    void refreshDevices();
+  }, []);
+
+  const persistConfig = async () => {
+    await saveConfig(selectedPath, label, formatOnApply);
+  };
+
+  const loadStatus = async () => {
+    if (!selectedPath) {
+      toaster.toast({ title: "No device", body: "Select an NVMe drive first." });
+      return;
+    }
+    setBusy(true);
+    try {
+      await persistConfig();
+      const data = await getStatus(selectedPath, label);
+      setStatus(data);
+      setOutput(
+        data.partition
+          ? `Partition ${data.partition} · mount ${data.mount_target || "none"}`
+          : "Partition not found for this label/device."
+      );
+    } catch (error) {
+      setOutput(`Status failed: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runFormatOnly = async () => {
+    if (!selectedPath) {
+      toaster.toast({ title: "No device", body: "Select an NVMe drive first." });
+      return;
+    }
+    if (selectedDevice?.is_system === "true") {
+      toaster.toast({
+        title: "Blocked",
+        body: "This device looks like system storage.",
+      });
+      return;
+    }
+    setBusy(true);
+    try {
+      await persistConfig();
+      const result = await formatNvme(selectedPath, label);
+      setOutput(formatResult(result));
+      toaster.toast({
+        title: result.ok ? "Formatted" : "Format failed",
+        body: result.ok ? label : result.errors.join(", "),
+      });
+      await refreshDevices();
+      await loadStatus();
+    } catch (error) {
+      setOutput(`Format failed: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runFix = async () => {
+    if (!selectedPath) {
+      toaster.toast({ title: "No device", body: "Select an NVMe drive first." });
+      return;
+    }
+    if (formatOnApply && selectedDevice?.is_system === "true") {
+      toaster.toast({
+        title: "Blocked",
+        body: "Cannot format a system device.",
+      });
+      return;
+    }
+    setBusy(true);
+    try {
+      await persistConfig();
+      const result = await applyNvmeFix(
+        selectedPath,
+        label,
+        formatOnApply
+      );
+      setOutput(formatResult(result));
+      toaster.toast({
+        title: result.ok ? "Storage configured" : "Setup failed",
+        body: result.ok
+          ? formatOnApply
+            ? "Formatted and automount enabled"
+            : "Automount enabled (no format)"
+          : "See output",
+      });
+      await loadStatus();
+    } catch (error) {
+      setOutput(`Setup failed: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const loadLogs = async () => {
+    setBusy(true);
+    try {
+      const logs = await getServiceLogs(120);
+      setOutput(logs || "No service logs found.");
+    } catch (error) {
+      setOutput(`Log read failed: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
-    <PanelSection title="Panel Section">
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={onClick}
-        >
-          {result ?? "Add two numbers via Python"}
-        </ButtonItem>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => startTimer()}
-        >
-          {"Start Python timer"}
-        </ButtonItem>
-      </PanelSectionRow>
+    <>
+      <PanelSection title="NVMe drive">
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={refreshDevices} disabled={busy}>
+            Rescan NVMe devices
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <Dropdown
+            rgOptions={dropdownOptions}
+            selectedOption={selectedPath || null}
+            strDefaultLabel="Select NVMe disk/partition"
+            onChange={(opt) => {
+              if (opt?.data) setSelectedPath(String(opt.data));
+            }}
+            disabled={busy || dropdownOptions.length === 0}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <TextField
+            label="Filesystem label (ext4, max 16 chars)"
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            disabled={busy}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Format before setup (erases all data on selected drive)"
+            checked={formatOnApply}
+            onChange={(checked) => setFormatOnApply(checked)}
+            disabled={busy}
+          />
+        </PanelSectionRow>
+      </PanelSection>
 
-      {/* <PanelSectionRow>
-        <div style={{ display: "flex", justifyContent: "center" }}>
-          <img src={logo} />
-        </div>
-      </PanelSectionRow> */}
+      <PanelSection title="Actions">
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={loadStatus} disabled={busy}>
+            Check status
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={runFormatOnly}
+            disabled={busy || !selectedPath}
+          >
+            Format only (destructive)
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={runFix} disabled={busy}>
+            {formatOnApply
+              ? "Format + configure automount"
+              : "Configure automount (no format)"}
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={loadLogs} disabled={busy}>
+            Show service logs
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
 
-      {/*<PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => {
-            Navigation.Navigate("/decky-plugin-test");
-            Navigation.CloseSideMenus();
-          }}
-        >
-          Router
-        </ButtonItem>
-      </PanelSectionRow>*/}
-    </PanelSection>
+      <PanelSection title="Status">
+        <PanelSectionRow>
+          <div style={{ fontSize: "0.8em", whiteSpace: "pre-wrap", width: "100%" }}>
+            {statusLines.join("\n")}
+          </div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div style={{ fontSize: "0.8em", whiteSpace: "pre-wrap", width: "100%" }}>
+            {output}
+          </div>
+        </PanelSectionRow>
+      </PanelSection>
+    </>
   );
-};
+}
+
+function formatResult(result: FixResult): string {
+  const lines = [
+    `ok: ${result.ok}`,
+    `label: ${result.label}`,
+    `device: ${result.device_path ?? "n/a"}`,
+    `partition: ${result.partition ?? "n/a"}`,
+    `mount: ${result.mount_target ?? "n/a"}`,
+    `formatted: ${result.formatted ?? false}`,
+    "",
+    ...result.logs,
+  ];
+  if (result.errors.length > 0) {
+    lines.push("", "errors:", ...result.errors);
+  }
+  return lines.join("\n");
+}
 
 export default definePlugin(() => {
-  console.log("Template plugin initializing, this is called once on frontend startup")
-
-  // serverApi.routerHook.addRoute("/decky-plugin-test", DeckyPluginRouterTest, {
-  //   exact: true,
-  // });
-
-  // Add an event listener to the "timer_event" event from the backend
-  const listener = addEventListener<[
-    test1: string,
-    test2: boolean,
-    test3: number
-  ]>("timer_event", (test1, test2, test3) => {
-    console.log("Template got timer_event with:", test1, test2, test3)
-    toaster.toast({
-      title: "template got timer_event",
-      body: `${test1}, ${test2}, ${test3}`
-    });
-  });
-
   return {
-    // The name shown in various decky menus
-    name: "Test Plugin",
-    // The element displayed at the top of your plugin's menu
-    titleView: <div className={staticClasses.Title}>Decky Example Plugin</div>,
-    // The content of your plugin's menu
+    name: "Map Storage",
+    titleView: <div className={staticClasses.Title}>Map Storage</div>,
     content: <Content />,
-    // The icon displayed in the plugin list
-    icon: <FaShip />,
-    // The function triggered when your plugin unloads
+    icon: <FaHdd />,
     onDismount() {
-      console.log("Unloading")
-      removeEventListener("timer_event", listener);
-      // serverApi.routerHook.removeRoute("/decky-plugin-test");
+      console.log("Map Storage unloading");
     },
   };
 });

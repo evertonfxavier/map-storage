@@ -1,33 +1,36 @@
 {
-  "name": "decky-plugin-template",
-  "version": "0.0.1",
-  "description": "A template to quickly create decky plugins from scratch, based on TypeScript and webpack",
+  "name": "map-storage",
+  "version": "0.1.0",
+  "description": "Decky plugin to setup NVMe storage on Steam Deck (optional format + udisks2 automount)",
   "type": "module",
+  "packageManager": "pnpm@9.15.0",
   "scripts": {
     "build": "rollup -c",
+    "build:zip": "bash scripts/build-zip.sh",
+    "build:ci": "bash scripts/ci-build-zip.sh",
     "watch": "rollup -c -w",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/SteamDeckHomebrew/decky-plugin-template.git"
+    "url": "git+https://github.com/evertonxavier/map-storage.git"
   },
   "keywords": [
     "decky",
-    "plugin",
-    "plugin-template",
+    "decky-plugin",
     "steam-deck",
-    "deck"
+    "nvme",
+    "storage"
   ],
-  "author": "You <you@you.tld>",
+  "author": "Everton Xavier",
   "license": "BSD-3-Clause",
   "bugs": {
-    "url": "https://github.com/SteamDeckHomebrew/decky-plugin-template/issues"
+    "url": "https://github.com/evertonxavier/map-storage/issues"
   },
-  "homepage": "https://github.com/SteamDeckHomebrew/decky-plugin-template#readme",
+  "homepage": "https://github.com/evertonxavier/map-storage#readme",
   "devDependencies": {
     "@decky/rollup": "^1.0.2",
-    "@decky/ui": "^4.11.0",
+    "@decky/ui": "^4.11.4",
     "@rollup/rollup-linux-x64-musl": "^4.53.3",
     "@types/react": "19.1.1",
     "@types/react-dom": "19.1.1",

@@ -1,11 +1,11 @@
 {
-  "name": "Example Plugin",
-  "author": "John Doe",
+  "name": "Map Storage",
+  "author": "Everton Xavier",
   "flags": ["debug", "_root"],
   "api_version": 1,
   "publish": {
-    "tags": ["template", "root"],
-    "description": "Decky example plugin.",
+    "tags": ["storage", "nvme", "root"],
+    "description": "Setup any NVMe for Steam libraries with optional format and udisks2 automount.",
     "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
   }
 }

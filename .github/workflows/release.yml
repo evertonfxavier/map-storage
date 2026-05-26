@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag to publish (e.g. v0.1.0)"
+        required: true
+        default: "v0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ github.event.inputs.version }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          node -e "
+            const fs=require('fs');
+            const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));
+            pkg.version='${VERSION}';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Build plugin ZIP
+        run: bash scripts/ci-build-zip.sh
+
+      - name: Prepare release notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cat > release-notes.md <<EOF
+          ## Map Storage v${VERSION}
+
+          Decky Loader plugin for NVMe storage setup on Steam Deck (optional format + udisks2 automount).
+
+          ### Install
+
+          1. Download \`map-storage-v${VERSION}.zip\` below.
+          2. On Steam Deck: Quick Access → Decky → Settings → Developer Mode ON.
+          3. **Install Plugin from ZIP** and select the file.
+
+          ### Requirements
+
+          - [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader)
+          - Expansion NVMe drive
+          - Plugin uses root privileges (\`_root\` flag) for system configuration
+
+          See [README](https://github.com/${{ github.repository }}#installation) for usage.
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Map Storage ${{ steps.version.outputs.tag }}
+          body_path: release-notes.md
+          files: |
+            out/map-storage-v${{ steps.version.outputs.version }}.zip
+            out/Map Storage.zip
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          generate_release_notes: true

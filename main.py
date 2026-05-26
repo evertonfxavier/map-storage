@@ -1,57 +1,537 @@
+import json
 import os
+import re
+import shlex
+import subprocess
+from typing import Any, Dict, List, Optional
 
-# The decky plugin module is located at decky-loader/plugin
-# For easy intellisense checkout the decky-loader code repo
-# and add the `decky-loader/plugin/imports` path to `python.analysis.extraPaths` in `.vscode/settings.json`
 import decky
-import asyncio
+
+UDEV_RULE_PATH = "/etc/udev/rules.d/99-map-storage-automount.rules"
+MOUNT_SCRIPT_PATH = "/usr/local/bin/map-storage-mount.sh"
+SERVICE_PATH = "/etc/systemd/system/map-storage-automount.service"
+LEGACY_SERVICE_PATH = "/etc/systemd/system/mount-nvme1tb.service"
+CONFIG_PATH = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "config.json")
+
+LABEL_MAX_LEN = 16
+LABEL_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+UDEV_RULE_TEMPLATE = """# map-storage automount for label "{label}"
+KERNEL!="nvme[0-9]*p[0-9]*", GOTO="map_storage_automount_end"
+ENV{{ID_FS_USAGE}}!="filesystem", GOTO="map_storage_automount_end"
+ENV{{ID_FS_LABEL}}!="{label}", GOTO="map_storage_automount_end"
+
+ACTION=="add",    RUN+="/bin/systemd-run --no-block --collect /usr/lib/hwsupport/block-device-event.sh add %k"
+ACTION=="remove", RUN+="/bin/systemd-run --no-block --collect /usr/lib/hwsupport/block-device-event.sh remove %k"
+
+LABEL="map_storage_automount_end"
+"""
+
+MOUNT_SCRIPT_TEMPLATE = """#!/bin/bash
+set -e
+
+LABEL="{label}"
+MAX_RETRIES=10
+RETRY_DELAY=2
+DECK_USER="{deck_user}"
+
+for i in $(seq 1 $MAX_RETRIES); do
+    PARTITION=$(blkid -L "$LABEL" 2>/dev/null || echo "")
+
+    if [[ -z "$PARTITION" ]]; then
+        echo "map-storage-mount[$i/$MAX_RETRIES]: partition not found, waiting..."
+        sleep $RETRY_DELAY
+        continue
+    fi
+
+    if findmnt -no TARGET "$PARTITION" >/dev/null 2>&1; then
+        MOUNT_AT=$(findmnt -no TARGET "$PARTITION")
+        chown 1000:1000 "$MOUNT_AT" 2>/dev/null || true
+        echo "map-storage-mount: already mounted at $MOUNT_AT"
+        exit 0
+    fi
+
+    if ! pidof udisksd >/dev/null 2>&1; then
+        echo "map-storage-mount[$i/$MAX_RETRIES]: udisksd not ready, waiting..."
+        sleep $RETRY_DELAY
+        continue
+    fi
+
+    if sudo -u "$DECK_USER" udisksctl mount -b "$PARTITION" --no-user-interaction >/dev/null 2>&1; then
+        sleep 1
+        MOUNT_AT=$(findmnt -no TARGET "$PARTITION" 2>/dev/null || echo "")
+        if [[ -n "$MOUNT_AT" ]]; then
+            chown 1000:1000 "$MOUNT_AT" 2>/dev/null || true
+            echo "map-storage-mount: mounted at $MOUNT_AT"
+        fi
+        exit 0
+    fi
+
+    sleep $RETRY_DELAY
+done
+
+PARTITION=$(blkid -L "$LABEL" 2>/dev/null || echo "")
+if [[ -n "$PARTITION" ]]; then
+    MOUNT_POINT="/run/media/$DECK_USER/$LABEL"
+    mkdir -p "$MOUNT_POINT"
+    mount -o rw,noatime "$PARTITION" "$MOUNT_POINT"
+    chown 1000:1000 "$MOUNT_POINT"
+    chmod 755 "$MOUNT_POINT"
+    echo "map-storage-mount: fallback mounted at $MOUNT_POINT"
+    exit 0
+fi
+
+echo "map-storage-mount: failed"
+exit 1
+"""
+
+SERVICE_TEMPLATE = """[Unit]
+Description=map-storage automount ({label}) via udisks2
+After=udisks2.service multi-user.target
+Wants=udisks2.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 5
+ExecStart={mount_script}
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+"""
+
 
 class Plugin:
-    # A normal method. It can be called from the TypeScript side using @decky/api.
-    async def add(self, left: int, right: int) -> int:
-        return left + right
+    def _run(self, command: str, check: bool = False) -> subprocess.CompletedProcess:
+        decky.logger.info("exec: %s", command)
+        result = subprocess.run(command, shell=True, text=True, capture_output=True)
+        if check and result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or command)
+        return result
 
-    async def long_running(self):
-        await asyncio.sleep(15)
-        # Passing through a bunch of random data, just as an example
-        await decky.emit("timer_event", "Hello from the backend!", True, 2)
+    def _write_file(self, path: str, content: str, mode: int = 0o644) -> None:
+        with open(path, "w", encoding="utf-8") as file:
+            file.write(content)
+        os.chmod(path, mode)
 
-    # Asyncio-compatible long-running code, executed in a task when the plugin is loaded
+    def _load_config(self) -> Dict[str, Any]:
+        if not os.path.isfile(CONFIG_PATH):
+            return {
+                "device_path": "",
+                "label": "SteamLibrary",
+                "format_on_apply": False,
+            }
+        with open(CONFIG_PATH, encoding="utf-8") as file:
+            return json.load(file)
+
+    def _save_config(self, config: Dict[str, Any]) -> None:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, "w", encoding="utf-8") as file:
+            json.dump(config, file, indent=2)
+
+    def _validate_label(self, label: str) -> str:
+        label = (label or "").strip()
+        if not label or len(label) > LABEL_MAX_LEN:
+            raise RuntimeError(
+                f"label must be 1-{LABEL_MAX_LEN} chars (letters, numbers, _ or -)"
+            )
+        if not LABEL_PATTERN.match(label):
+            raise RuntimeError("invalid label characters")
+        return label
+
+    def _validate_nvme_path(self, device_path: str) -> str:
+        device_path = (device_path or "").strip()
+        if not re.match(r"^/dev/nvme\d+n\d+(p\d+)?$", device_path):
+            raise RuntimeError(f"invalid NVMe path: {device_path}")
+        return device_path
+
+    def _root_mount_sources(self) -> List[str]:
+        result = self._run("findmnt -no SOURCE / /home 2>/dev/null || true")
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+    def _is_system_device(self, path: str, mountpoint: str) -> bool:
+        if mountpoint in ("/", "/home", "/var", "/usr"):
+            return True
+        if not mountpoint:
+            mountpoint = self._run(
+                f"findmnt -no TARGET {shlex.quote(path)} 2>/dev/null || true"
+            ).stdout.strip()
+            if mountpoint in ("/", "/home", "/var", "/usr"):
+                return True
+
+        roots = self._root_mount_sources()
+        if path in roots:
+            return True
+
+        try:
+            disk = self._disk_from_path(path)
+        except RuntimeError:
+            disk = path
+
+        for root in roots:
+            if root == path or root.startswith(disk):
+                return True
+        return False
+
+    def _flatten_lsblk(self, devices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        flat: List[Dict[str, Any]] = []
+        for device in devices:
+            flat.append(device)
+            for child in device.get("children") or []:
+                flat.extend(self._flatten_lsblk([child]))
+        return flat
+
+    async def list_nvme_devices(self) -> List[Dict[str, str]]:
+        result = self._run(
+            "lsblk -J -o NAME,PATH,SIZE,TYPE,FSTYPE,LABEL,MODEL,TRAN,MOUNTPOINT"
+        )
+        if not result.stdout.strip():
+            return []
+
+        payload = json.loads(result.stdout)
+        entries: List[Dict[str, str]] = []
+
+        for block in self._flatten_lsblk(payload.get("blockdevices", [])):
+            path = block.get("path") or ""
+            name = block.get("name") or ""
+            if not name.startswith("nvme"):
+                continue
+
+            mountpoint = block.get("mountpoint") or ""
+            entry_type = block.get("type") or ""
+            is_system = self._is_system_device(path, mountpoint)
+
+            entries.append(
+                {
+                    "id": path,
+                    "path": path,
+                    "name": name,
+                    "size": block.get("size") or "?",
+                    "type": entry_type,
+                    "fstype": block.get("fstype") or "",
+                    "label": block.get("label") or "",
+                    "mountpoint": mountpoint,
+                    "model": block.get("model") or "",
+                    "is_system": str(is_system).lower(),
+                    "can_format": str(
+                        entry_type in ("disk", "part") and not is_system
+                    ).lower(),
+                }
+            )
+
+        return entries
+
+    async def get_config(self) -> Dict[str, Any]:
+        return self._load_config()
+
+    async def save_config(
+        self, device_path: str, label: str, format_on_apply: bool
+    ) -> Dict[str, Any]:
+        config = {
+            "device_path": self._validate_nvme_path(device_path)
+            if device_path
+            else "",
+            "label": self._validate_label(label),
+            "format_on_apply": bool(format_on_apply),
+        }
+        self._save_config(config)
+        return config
+
+    def _disk_from_path(self, device_path: str) -> str:
+        match = re.match(r"^(/dev/nvme\d+n\d+)", device_path)
+        if not match:
+            raise RuntimeError(f"cannot resolve disk for {device_path}")
+        return match.group(1)
+
+    def _partition_after_format(self, disk_path: str, label: str) -> str:
+        partition = self._run(f"blkid -L {shlex.quote(label)}").stdout.strip()
+        if partition:
+            return partition
+
+        result = self._run(
+            f"lsblk -J -o NAME,PATH,TYPE {shlex.quote(disk_path)}", check=True
+        )
+        payload = json.loads(result.stdout)
+        disks = payload.get("blockdevices", [])
+        if not disks:
+            raise RuntimeError("disk not found after format")
+
+        for child in disks[0].get("children") or []:
+            if child.get("type") == "part" and child.get("path"):
+                return child["path"]
+
+        raise RuntimeError("partition not found after format")
+
+    def _resolve_target_partition(self, device_path: str, label: str) -> str:
+        by_label = self._run(f"blkid -L {shlex.quote(label)}").stdout.strip()
+        if by_label:
+            return by_label
+
+        device_path = self._validate_nvme_path(device_path)
+        if re.search(r"p\d+$", device_path):
+            return device_path
+
+        return self._partition_after_format(device_path, label)
+
+    async def format_nvme(self, device_path: str, label: str) -> Dict[str, object]:
+        logs: List[str] = []
+        errors: List[str] = []
+
+        try:
+            label = self._validate_label(label)
+            device_path = self._validate_nvme_path(device_path)
+
+            readonly_status = self._run("steamos-readonly status").stdout
+            if "enabled" in readonly_status:
+                self._run("steamos-readonly disable", check=True)
+                logs.append("disabled steamos readonly mode")
+
+            disk_path = self._disk_from_path(device_path)
+            if self._is_system_device(device_path, ""):
+                raise RuntimeError("refusing to format a system device")
+
+            # Unmount anything on this NVMe controller disk
+            result = self._run(
+                f"lsblk -ln -o PATH,MOUNTPOINT {shlex.quote(disk_path)}"
+            )
+            for line in result.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[1]:
+                    self._run(f"umount -lf {shlex.quote(parts[0])} || true")
+                    logs.append(f"unmounted {parts[0]}")
+
+            is_partition = bool(re.search(r"p\d+$", device_path))
+
+            if is_partition:
+                target = device_path
+                logs.append(f"formatting partition {target}")
+                self._run(
+                    f"mkfs.ext4 -F -L {shlex.quote(label)} {shlex.quote(target)}",
+                    check=True,
+                )
+            else:
+                logs.append(f"partitioning disk {disk_path}")
+                self._run(
+                    f"parted -s {shlex.quote(disk_path)} mklabel gpt mkpart primary ext4 1MiB 100%",
+                    check=True,
+                )
+                self._run("partprobe || true")
+                target = self._partition_after_format(disk_path, label)
+                self._run(
+                    f"mkfs.ext4 -F -L {shlex.quote(label)} {shlex.quote(target)}",
+                    check=True,
+                )
+                logs.append(f"formatted {target}")
+
+            partition = self._run(f"blkid -L {shlex.quote(label)}").stdout.strip()
+            return {
+                "ok": True,
+                "label": label,
+                "partition": partition,
+                "logs": logs,
+                "errors": errors,
+            }
+        except Exception as error:
+            errors.append(str(error))
+            decky.logger.exception("format_nvme failed")
+            return {"ok": False, "label": label, "logs": logs, "errors": errors}
+
+    def _disable_legacy_service(self, logs: List[str]) -> None:
+        if os.path.isfile(LEGACY_SERVICE_PATH):
+            self._run("systemctl disable mount-nvme1tb.service || true")
+            self._run("systemctl stop mount-nvme1tb.service || true")
+            logs.append("disabled legacy mount-nvme1tb.service")
+
+    def _ensure_steam_layout(self, mount_at: str, label: str, logs: List[str]) -> None:
+        steamapps = os.path.join(mount_at, "steamapps")
+        if not os.path.isdir(steamapps):
+            for relative in (
+                "steamapps/common",
+                "steamapps/downloading",
+                "steamapps/temp",
+                "steamapps/shadercache",
+            ):
+                os.makedirs(os.path.join(mount_at, relative), exist_ok=True)
+            self._run(f"chown -R 1000:1000 {shlex.quote(steamapps)}")
+            logs.append("created steamapps folder structure")
+
+        vdf_path = os.path.join(mount_at, "libraryfolder.vdf")
+        if not os.path.isfile(vdf_path):
+            content_id = self._run(
+                "shuf -i 1000000000000000000-9999999999999999999 -n 1", check=True
+            ).stdout.strip()
+            vdf_content = (
+                '"libraryfolder"\n'
+                "{\n"
+                f'\t"contentid"\t\t"{content_id}"\n'
+                f'\t"label"\t\t"{label}"\n'
+                "}\n"
+            )
+            self._write_file(vdf_path, vdf_content)
+            self._run(f"chown 1000:1000 {shlex.quote(vdf_path)}")
+            logs.append("created libraryfolder.vdf")
+
+    async def get_status(
+        self, device_path: str = "", label: str = "SteamLibrary"
+    ) -> Dict[str, str]:
+        label = self._validate_label(label)
+        partition = self._run(f"blkid -L {shlex.quote(label)}").stdout.strip()
+
+        if not partition and device_path:
+            try:
+                partition = self._resolve_target_partition(device_path, label)
+            except Exception:
+                partition = ""
+
+        mount_target = ""
+        if partition:
+            mount_target = self._run(
+                f"findmnt -no TARGET {shlex.quote(partition)}"
+            ).stdout.strip()
+
+        readonly = self._run("steamos-readonly status").stdout.strip()
+        service_enabled = self._run(
+            "systemctl is-enabled map-storage-automount.service"
+        ).stdout.strip()
+        service_active = self._run(
+            "systemctl is-active map-storage-automount.service"
+        ).stdout.strip()
+
+        return {
+            "device_path": device_path,
+            "label": label,
+            "partition": partition,
+            "mount_target": mount_target,
+            "readonly_status": readonly or "unknown",
+            "service_enabled": service_enabled or "unknown",
+            "service_active": service_active or "unknown",
+            "has_udev_rule": str(os.path.isfile(UDEV_RULE_PATH)).lower(),
+            "has_mount_script": str(os.path.isfile(MOUNT_SCRIPT_PATH)).lower(),
+            "has_service_file": str(os.path.isfile(SERVICE_PATH)).lower(),
+            "configured_label": self._load_config().get("label", label),
+        }
+
+    async def get_service_logs(self, lines: int = 80) -> str:
+        safe_lines = max(20, min(lines, 300))
+        result = self._run(
+            f"journalctl -u map-storage-automount.service -n {safe_lines} --no-pager"
+        )
+        legacy = self._run(
+            f"journalctl -u mount-nvme1tb.service -n {safe_lines} --no-pager"
+        )
+        chunks = [
+            (result.stdout or result.stderr or "").strip(),
+            (legacy.stdout or legacy.stderr or "").strip(),
+        ]
+        return "\n\n".join(chunk for chunk in chunks if chunk)
+
+    async def apply_nvme_fix(
+        self, device_path: str, label: str, format_drive: bool
+    ) -> Dict[str, object]:
+        logs: List[str] = []
+        errors: List[str] = []
+        deck_user = getattr(decky, "DECKY_USER", "deck")
+
+        try:
+            label = self._validate_label(label)
+            if not device_path:
+                raise RuntimeError("select an NVMe device first")
+
+            device_path = self._validate_nvme_path(device_path)
+            self._save_config(
+                {
+                    "device_path": device_path,
+                    "label": label,
+                    "format_on_apply": bool(format_drive),
+                }
+            )
+
+            if format_drive:
+                fmt = await self.format_nvme(device_path, label)
+                logs.extend(fmt.get("logs", []))
+                if not fmt.get("ok"):
+                    errors.extend(fmt.get("errors", []))
+                    raise RuntimeError(
+                        errors[-1] if errors else "format failed"
+                    )
+
+            readonly_status = self._run("steamos-readonly status").stdout
+            if "enabled" in readonly_status:
+                self._run("steamos-readonly disable", check=True)
+                logs.append("disabled steamos readonly mode")
+
+            partition = self._resolve_target_partition(device_path, label)
+            if not partition:
+                raise RuntimeError(
+                    f"no partition found for label '{label}'. "
+                    "Enable format or pick a partitioned drive."
+                )
+            logs.append(f"target partition: {partition}")
+
+            self._disable_legacy_service(logs)
+
+            self._write_file(UDEV_RULE_PATH, UDEV_RULE_TEMPLATE.format(label=label))
+            logs.append(f"wrote udev rule: {UDEV_RULE_PATH}")
+
+            mount_script = MOUNT_SCRIPT_TEMPLATE.format(
+                label=label, deck_user=deck_user
+            )
+            self._write_file(MOUNT_SCRIPT_PATH, mount_script, 0o755)
+            logs.append(f"wrote mount helper: {MOUNT_SCRIPT_PATH}")
+
+            service_content = SERVICE_TEMPLATE.format(
+                label=label, mount_script=MOUNT_SCRIPT_PATH
+            )
+            self._write_file(SERVICE_PATH, service_content)
+            logs.append(f"wrote systemd service: {SERVICE_PATH}")
+
+            self._run("udevadm control --reload-rules || true")
+            self._run("udevadm trigger || true")
+            self._run("systemctl daemon-reload", check=True)
+            self._run("systemctl enable map-storage-automount.service", check=True)
+            self._run("systemctl restart map-storage-automount.service", check=True)
+            logs.append("enabled and restarted map-storage-automount.service")
+
+            mount_target = self._run(
+                f"findmnt -no TARGET {shlex.quote(partition)}"
+            ).stdout.strip()
+            if mount_target:
+                self._ensure_steam_layout(mount_target, label, logs)
+                logs.append(f"mounted at: {mount_target}")
+            else:
+                logs.append("not mounted now; service will retry on boot")
+
+            return {
+                "ok": True,
+                "label": label,
+                "device_path": device_path,
+                "partition": partition,
+                "mount_target": mount_target,
+                "formatted": format_drive,
+                "logs": logs,
+                "errors": errors,
+            }
+        except Exception as error:
+            errors.append(str(error))
+            decky.logger.exception("apply_nvme_fix failed")
+            return {
+                "ok": False,
+                "label": label,
+                "device_path": device_path,
+                "formatted": format_drive,
+                "logs": logs,
+                "errors": errors,
+            }
+
     async def _main(self):
-        self.loop = asyncio.get_event_loop()
-        decky.logger.info("Hello World!")
+        decky.logger.info("map-storage backend loaded")
 
-    # Function called first during the unload process, utilize this to handle your plugin being stopped, but not
-    # completely removed
     async def _unload(self):
-        decky.logger.info("Goodnight World!")
-        pass
+        decky.logger.info("map-storage backend unloaded")
 
-    # Function called after `_unload` during uninstall, utilize this to clean up processes and other remnants of your
-    # plugin that may remain on the system
     async def _uninstall(self):
-        decky.logger.info("Goodbye World!")
-        pass
-
-    async def start_timer(self):
-        self.loop.create_task(self.long_running())
-
-    # Migrations that should be performed before entering `_main()`.
-    async def _migration(self):
-        decky.logger.info("Migrating")
-        # Here's a migration example for logs:
-        # - `~/.config/decky-template/template.log` will be migrated to `decky.decky_LOG_DIR/template.log`
-        decky.migrate_logs(os.path.join(decky.DECKY_USER_HOME,
-                                               ".config", "decky-template", "template.log"))
-        # Here's a migration example for settings:
-        # - `~/homebrew/settings/template.json` is migrated to `decky.decky_SETTINGS_DIR/template.json`
-        # - `~/.config/decky-template/` all files and directories under this root are migrated to `decky.decky_SETTINGS_DIR/`
-        decky.migrate_settings(
-            os.path.join(decky.DECKY_HOME, "settings", "template.json"),
-            os.path.join(decky.DECKY_USER_HOME, ".config", "decky-template"))
-        # Here's a migration example for runtime data:
-        # - `~/homebrew/template/` all files and directories under this root are migrated to `decky.decky_RUNTIME_DIR/`
-        # - `~/.local/share/decky-template/` all files and directories under this root are migrated to `decky.decky_RUNTIME_DIR/`
-        decky.migrate_runtime(
-            os.path.join(decky.DECKY_HOME, "template"),
-            os.path.join(decky.DECKY_USER_HOME, ".local", "share", "decky-template"))
+        decky.logger.info("map-storage backend uninstalled")
