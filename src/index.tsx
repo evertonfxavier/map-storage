@@ -39,6 +39,7 @@ type StorageDevice = {
   is_system: string;
   can_format: string;
   is_mounted?: string;
+  is_expansion?: string;
 };
 
 type PluginConfig = {
@@ -107,6 +108,7 @@ function deviceLabel(dev: StorageDevice): string {
     dev.is_mounted === "true" || dev.mountpoint ? "mounted" : "unmounted",
     dev.transport === "encrypted" ? "encrypted" : "",
     dev.type,
+    dev.is_expansion === "true" ? "EXPANSION" : "",
     dev.is_system === "true" ? "SYSTEM" : "",
   ]
     .filter(Boolean)
@@ -118,13 +120,20 @@ function deviceLabel(dev: StorageDevice): string {
 }
 
 function pickPreferredDevice(list: StorageDevice[]): StorageDevice | undefined {
+  const isNvme1Tb = (d: StorageDevice) =>
+    storageLabelOf(d).toLowerCase() === "nvme1tb";
+
   return (
-    list.find((d) => d.transport === "steam-library" && d.type === "part") ??
-    list.find((d) => d.mountpoint && d.label && d.type === "part") ??
-    list.find((d) => /nvme1n1/.test(d.path) && d.type === "part" && d.label) ??
+    list.find((d) => isNvme1Tb(d) && d.type === "part") ??
     list.find(
-      (d) => storageLabelOf(d).toLowerCase() === "nvme1tb"
+      (d) =>
+        /^\/dev\/nvme0n\d+p\d+/.test(d.path) &&
+        d.type === "part" &&
+        isNvme1Tb(d)
     ) ??
+    list.find((d) => d.transport === "steam-library" && d.type === "part") ??
+    list.find((d) => d.is_expansion === "true" && d.type === "part") ??
+    list.find((d) => d.mountpoint?.startsWith("/run/media/") && d.type === "part") ??
     list.find(
       (d) =>
         d.is_system !== "true" &&

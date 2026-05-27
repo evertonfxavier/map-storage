@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-05-26
+
+### Fixed
+
+- NVMe layout detection uses the disk that mounts `/` as internal (not hardcoded `nvme0` = system).
+- Auto-select prefers label **NVMe1TB** and `/dev/nvme0n1p*` expansion (fixes Decks where expansion is `nvme0` and SteamOS is `nvme1`).
+
+### Added
+
+- `is_expansion` flag and **EXPANSION** badge in the device list.
+
 ## [0.1.4] - 2026-05-26
 
 ### Fixed
@@ -69,7 +80,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial Map Storage plugin: storage setup UI, format toggle, automount fix for Steam Game Mode.
 - GitHub Actions CI and release workflow with downloadable ZIPs.
 
-[Unreleased]: https://github.com/evertonfxavier/map-storage/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/evertonfxavier/map-storage/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.5
 [0.1.4]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.4
 [0.1.3]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.3
 [0.1.2]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.2

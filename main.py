@@ -261,17 +261,73 @@ class Plugin:
             "is_system": str(is_system).lower(),
             "can_format": str(entry_type in ("disk", "part") and not is_system).lower(),
             "is_mounted": str(bool(mountpoint)).lower(),
+            "is_expansion": "false",
         }
 
-    def _mark_internal_nvme(self, entries: List[Dict[str, str]]) -> None:
-        """Steam Deck internal storage is usually nvme0n1; expansion is nvme1n1."""
+    def _nvme_disk_from_device(self, path: str) -> str:
+        match = re.match(r"^(/dev/nvme\d+n\d+)", path)
+        return match.group(1) if match else ""
+
+    def _os_root_nvme_disk(self) -> str:
+        """NVMe that hosts / (internal on Deck; may be nvme0 or nvme1)."""
+        findmnt = self._tool("findmnt")
+        result = self._run_cli([findmnt, "-no", "SOURCE", "/"])
+        if result.returncode != 0:
+            return ""
+        return self._nvme_disk_from_device((result.stdout or "").strip())
+
+    def _entry_nvme_disk(self, entry: Dict[str, str]) -> str:
+        path = entry.get("path", "")
+        if self._is_partition_path(path):
+            return self._disk_from_path(path)
+        if re.match(r"^/dev/nvme\d+n\d+$", path):
+            return path
+        return self._nvme_disk_from_device(path)
+
+    def _mark_steamdeck_nvme_layout(self, entries: List[Dict[str, str]]) -> None:
+        """
+        Classify NVMe by OS root mount, not nvme index.
+        Some Decks: nvme0 = expansion (NVMe1TB), nvme1 = SteamOS.
+        """
+        os_disk = self._os_root_nvme_disk()
+        library_labels = frozenset({"NVME1TB", "STEAMLIBRARY"})
+
         for entry in entries:
             path = entry.get("path", "")
-            if re.match(r"^/dev/nvme0n\d", path) and entry.get("transport") != "steam-library":
+            if not path.startswith("/dev/nvme"):
+                continue
+
+            mountpoint = entry.get("mountpoint") or ""
+            label_key = (entry.get("label") or entry.get("storage_label") or "").upper()
+            is_library = label_key in library_labels
+
+            if entry.get("transport") == "steam-library" or mountpoint.startswith(
+                "/run/media/"
+            ):
+                entry["is_system"] = "false"
+                entry["can_format"] = str(entry.get("type") == "part").lower()
+                entry["is_expansion"] = "true"
+                continue
+
+            disk = self._entry_nvme_disk(entry)
+            if os_disk and disk == os_disk:
                 entry["is_system"] = "true"
                 entry["can_format"] = "false"
-                if not entry.get("transport"):
-                    entry["transport"] = "internal"
+                entry["is_expansion"] = "false"
+                if entry.get("transport") not in ("steam-library",):
+                    entry["transport"] = entry.get("transport") or "internal"
+                continue
+
+            if is_library and (entry.get("fstype") or "").lower() == "ext4":
+                entry["is_system"] = "false"
+                entry["can_format"] = str(entry.get("type") == "part").lower()
+                entry["is_expansion"] = "true"
+                if entry.get("transport") in ("", "unknown", "unmounted"):
+                    entry["transport"] = "expansion"
+                continue
+
+            if entry.get("is_system") != "true" and entry.get("type") == "part":
+                entry["is_expansion"] = "true"
 
     def _resolve_working_label(self, device_path: str, label: str) -> str:
         device_path = self._validate_device_path(device_path)
@@ -578,11 +634,12 @@ class Plugin:
             if entry:
                 entries.append(entry)
 
-        self._mark_internal_nvme(entries)
+        self._mark_steamdeck_nvme_layout(entries)
 
         entries.sort(
             key=lambda e: (
                 e.get("is_system") == "true",
+                e.get("is_expansion") != "true",
                 e.get("is_mounted") != "true",
                 e.get("transport") != "steam-library",
                 e.get("path", ""),
