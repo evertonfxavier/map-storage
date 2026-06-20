@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-06-20
+
+### Fixed
+
+- **Root privilege (critical):** `plugin.json` used the obsolete `_root` flag, so Decky ran the backend as `deck` and the automount/self-heal never worked. Decky checks for `root` in `flags` — corrected to `["debug", "root"]`.
+- Self-heal no longer trusts a fixed `/dev/nvmeXn1pY` path (NVMe names swap between boots) and resolves the library by filesystem label/identity instead.
+- Self-correcting config: when the saved label is stale, the plugin auto-detects the real library partition (mounted or not, preferring `NVMe1TB`, excluding the SteamOS disk) and persists it.
+
+### Added
+
+- `ping` reports `is_root`; UI shows a red warning when the backend is not running as root.
+
 ## [0.1.7] - 2026-06-20
 
 ### Fixed
@@ -98,7 +110,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial Map Storage plugin: storage setup UI, format toggle, automount fix for Steam Game Mode.
 - GitHub Actions CI and release workflow with downloadable ZIPs.
 
-[Unreleased]: https://github.com/evertonfxavier/map-storage/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/evertonfxavier/map-storage/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.8
 [0.1.7]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.7
 [0.1.6]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.6
 [0.1.5]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.5

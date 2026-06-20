@@ -202,6 +202,7 @@ function Content() {
   const [busy, setBusy] = useState(false);
   const [scanState, setScanState] = useState<ScanUiState>("idle");
   const [pluginVersion, setPluginVersion] = useState("");
+  const [isRoot, setIsRoot] = useState<boolean | null>(null);
 
   const dropdownOptions = useMemo(
     () =>
@@ -370,6 +371,9 @@ function Content() {
     try {
       const pong = await pingBackend();
       if (pong?.version) setPluginVersion(pong.version);
+      if (typeof pong?.is_root === "string") {
+        setIsRoot(pong.is_root === "true");
+      }
       if (pong?.status !== "ok") {
         throw new Error("Backend ping failed");
       }
@@ -564,6 +568,15 @@ function Content() {
           <PanelSectionRow>
             <div style={{ fontSize: "0.75em", opacity: 0.8 }}>
               Plugin v{pluginVersion}
+              {isRoot === true ? " · root" : isRoot === false ? " · NOT root" : ""}
+            </div>
+          </PanelSectionRow>
+        ) : null}
+        {isRoot === false ? (
+          <PanelSectionRow>
+            <div style={{ fontSize: "0.8em", color: "#ff6b6b", width: "100%" }}>
+              Backend is not running as root, so automount cannot be configured.
+              Reinstall this plugin (it now requests root) and restart Decky.
             </div>
           </PanelSectionRow>
         ) : null}

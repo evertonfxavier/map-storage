@@ -666,6 +666,8 @@ class Plugin:
             "status": "ok",
             "version": getattr(decky, "DECKY_PLUGIN_VERSION", "unknown"),
             "user": getattr(decky, "DECKY_USER", "deck"),
+            "is_root": str(os.getuid() == 0).lower(),
+            "euid": str(os.getuid()),
         }
 
     def _flatten_lsblk(self, devices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1136,6 +1138,77 @@ class Plugin:
         self._run_cli([systemctl, "restart", "map-storage-automount.service"])
         logs.append("enabled and restarted map-storage-automount.service")
 
+    def _detect_library_partition(
+        self, preferred_label: str = ""
+    ) -> Optional[Tuple[str, str]]:
+        """
+        Find the Steam library partition to (re)mount, even if it is not mounted
+        yet. Returns (partition, label) or None.
+
+        NVMe device names (nvme0/nvme1) are NOT stable across boots/updates, so we
+        resolve by filesystem identity, never by a fixed /dev path. We exclude the
+        SteamOS internal disk (the one hosting `/`) and only consider formatted,
+        non-system partitions.
+        """
+        os_disk = self._os_root_nvme_disk()
+        deck_user = getattr(decky, "DECKY_USER", "deck")
+        preferred_upper = (preferred_label or "").upper()
+
+        candidates: List[Tuple[str, str]] = []
+        seen: set[str] = set()
+
+        def consider(source: str) -> None:
+            if not source or source in seen:
+                return
+            seen.add(source)
+            if not DEVICE_PATH_PATTERN.match(source):
+                return
+            if not self._is_partition_path(source):
+                return
+            if os_disk and self._disk_from_path(source) == os_disk:
+                return  # never touch the SteamOS internal disk
+            mountpoint = self._findmnt_target(source)
+            if self._is_system_device(source, mountpoint):
+                return
+            fstype = self._blkid_field(source, "TYPE")
+            if fstype.lower() not in ("ext4", "btrfs", "xfs", "f2fs"):
+                return
+            label = self._label_on_device(source)
+            if not label:
+                return
+            candidates.append((source, label))
+
+        # Mounted Steam libraries first (strongest signal).
+        media_root = f"/run/media/{deck_user}"
+        if os.path.isdir(media_root):
+            findmnt = self._tool("findmnt")
+            for folder in sorted(os.listdir(media_root)):
+                mp = os.path.join(media_root, folder)
+                if os.path.isdir(mp):
+                    consider(
+                        self._run_cli([findmnt, "-no", "SOURCE", mp]).stdout.strip()
+                    )
+
+        # Then any formatted, non-system partition known to blkid (also unmounted).
+        for line in self._run_cli(
+            [self._tool("blkid"), "-o", "device"]
+        ).stdout.splitlines():
+            consider(line.strip())
+
+        if not candidates:
+            return None
+
+        for source, label in candidates:
+            if preferred_upper and label.upper() == preferred_upper:
+                return (source, label)
+        for source, label in candidates:
+            if label.upper() == "NVME1TB":
+                return (source, label)
+        # Only auto-adopt a lone candidate to avoid grabbing the wrong data disk.
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
     def _self_heal(self) -> None:
         """
         SteamOS uses an immutable A/B root: OS updates wipe /etc and /usr/local,
@@ -1157,7 +1230,10 @@ class Plugin:
         logs: List[str] = []
         try:
             if label:
-                label = self._validate_label(label)
+                try:
+                    label = self._validate_label(label)
+                except Exception:
+                    label = ""
 
             partition = ""
             if label:
@@ -1165,12 +1241,32 @@ class Plugin:
                     [self._tool("blkid"), "-L", label]
                 ).stdout.strip()
             if not partition and device_path and self._is_partition_path(device_path):
-                partition = device_path
+                # device_path may be stale (nvme names swap); only trust it if it
+                # actually has a filesystem label now.
+                on_dev = self._label_on_device(device_path)
+                if on_dev:
+                    partition = device_path
+                    label = self._validate_label(on_dev)
 
             if not partition:
+                # Saved label/device is stale: adopt the real library partition.
+                detected = self._detect_library_partition(config.get("label", ""))
+                if detected:
+                    partition, label = detected
+                    logs.append(f"auto-detected library {partition} (label {label})")
+                    self._save_config(
+                        {
+                            "device_path": partition,
+                            "label": label,
+                            "format_on_apply": False,
+                        }
+                    )
+
+            if not partition or not label:
                 decky.logger.info(
-                    "map-storage self-heal: partition for label '%s' not present yet",
-                    label,
+                    "map-storage self-heal: no library partition resolved yet "
+                    "(configured label '%s')",
+                    config.get("label", ""),
                 )
                 return
 
