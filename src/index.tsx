@@ -94,6 +94,7 @@ const getStatus = callable<[device_path: string, label: string], StatusResult>(
   "get_status"
 );
 const getServiceLogs = callable<[lines: number], string>("get_service_logs");
+const reapplyNow = callable<[], FixResult>("reapply_now");
 
 function storageLabelOf(dev: StorageDevice | undefined): string {
   if (!dev) return "";
@@ -515,6 +516,28 @@ function Content() {
     }
   };
 
+  const runReapply = async () => {
+    setBusy(true);
+    setOutput("Re-applying saved automount setup…");
+    try {
+      const result = await reapplyNow();
+      setOutput(formatResult(result));
+      toaster.toast({
+        title: result.ok ? "Re-applied" : "Re-apply incomplete",
+        body: result.ok
+          ? `Mounted at ${result.mount_target}`
+          : result.errors[0] || "See output",
+      });
+      await loadStatus();
+    } catch (error) {
+      const msg = errorMessage(error);
+      setOutput(`Re-apply failed:\n${msg}`);
+      toaster.toast({ title: "Re-apply error", body: msg });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <>
       <PanelSection title="Storage devices">
@@ -634,6 +657,11 @@ function Content() {
             {formatOnApply
               ? "Format + configure automount"
               : "Configure automount (no format)"}
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => void runReapply()} disabled={busy}>
+            Re-apply after system update
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>

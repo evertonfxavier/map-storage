@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-06-20
+
+### Fixed
+
+- **Survives SteamOS updates:** the plugin now self-heals on every load. SteamOS uses an immutable A/B root, so OS updates wipe `/etc` and `/usr/local` (udev rule, mount script, systemd unit). On boot the plugin re-creates them from the saved config and mounts the configured library automatically.
+
+### Added
+
+- `reapply_now` backend method and **"Re-apply after system update"** button to manually restore the automount setup.
+
 ## [0.1.5] - 2026-05-26
 
 ### Fixed
@@ -80,7 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial Map Storage plugin: storage setup UI, format toggle, automount fix for Steam Game Mode.
 - GitHub Actions CI and release workflow with downloadable ZIPs.
 
-[Unreleased]: https://github.com/evertonfxavier/map-storage/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/evertonfxavier/map-storage/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.6
 [0.1.5]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.5
 [0.1.4]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.4
 [0.1.3]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.3

@@ -1,6 +1,6 @@
 {
   "name": "map-storage",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Decky plugin to setup any plugged storage on Steam Deck (optional format + udisks2 automount)",
   "type": "module",
   "packageManager": "pnpm@9.15.0",

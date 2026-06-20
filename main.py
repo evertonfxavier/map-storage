@@ -1104,8 +1104,134 @@ class Plugin:
         """Backward-compatible alias."""
         return await self.apply_storage_fix(device_path, label, format_drive)
 
+    def _install_automount_units(
+        self, label: str, deck_user: str, logs: List[str]
+    ) -> None:
+        """(Re)write udev rule + mount script + systemd unit and reload."""
+        readonly = self._run_cli([self._tool("steamos-readonly"), "status"])
+        if "enabled" in (readonly.stdout or ""):
+            self._run_cli([self._tool("steamos-readonly"), "disable"])
+            logs.append("disabled steamos readonly mode")
+
+        self._disable_legacy_service(logs)
+
+        self._write_file(UDEV_RULE_PATH, UDEV_RULE_TEMPLATE.format(label=label))
+        self._write_file(
+            MOUNT_SCRIPT_PATH,
+            MOUNT_SCRIPT_TEMPLATE.format(label=label, deck_user=deck_user),
+            0o755,
+        )
+        self._write_file(
+            SERVICE_PATH,
+            SERVICE_TEMPLATE.format(label=label, mount_script=MOUNT_SCRIPT_PATH),
+        )
+        logs.append("rewrote udev rule, mount script and systemd unit")
+
+        udevadm = self._tool("udevadm")
+        self._run_cli([udevadm, "control", "--reload-rules"])
+        self._run_cli([udevadm, "trigger"])
+        systemctl = self._tool("systemctl")
+        self._run_cli([systemctl, "daemon-reload"])
+        self._run_cli([systemctl, "enable", "map-storage-automount.service"])
+        self._run_cli([systemctl, "restart", "map-storage-automount.service"])
+        logs.append("enabled and restarted map-storage-automount.service")
+
+    def _self_heal(self) -> None:
+        """
+        SteamOS uses an immutable A/B root: OS updates wipe /etc and /usr/local,
+        removing our udev rule, mount script and systemd unit. The plugin lives on
+        the persistent home partition, so on every load we re-apply the config and
+        mount the configured library if it is not mounted yet.
+        """
+        if os.getuid() != 0:
+            decky.logger.warning("map-storage self-heal skipped: not running as root")
+            return
+
+        config = self._load_config()
+        device_path = (config.get("device_path") or "").strip()
+        label = (config.get("label") or "").strip()
+        if not device_path and not label:
+            decky.logger.info("map-storage self-heal: nothing configured yet")
+            return
+
+        logs: List[str] = []
+        try:
+            if label:
+                label = self._validate_label(label)
+
+            partition = ""
+            if label:
+                partition = self._run_cli(
+                    [self._tool("blkid"), "-L", label]
+                ).stdout.strip()
+            if not partition and device_path and self._is_partition_path(device_path):
+                partition = device_path
+
+            if not partition:
+                decky.logger.info(
+                    "map-storage self-heal: partition for label '%s' not present yet",
+                    label,
+                )
+                return
+
+            already = self._findmnt_target(partition)
+            units_present = (
+                os.path.isfile(SERVICE_PATH)
+                and os.path.isfile(MOUNT_SCRIPT_PATH)
+                and os.path.isfile(UDEV_RULE_PATH)
+            )
+
+            if already and units_present:
+                decky.logger.info(
+                    "map-storage self-heal: already mounted at %s", already
+                )
+                return
+
+            deck_user = getattr(decky, "DECKY_USER", "deck")
+            self._install_automount_units(label, deck_user, logs)
+
+            mount_target = self._findmnt_target(partition)
+            if not mount_target:
+                mount_target = self._try_mount_as_deck(partition, deck_user, logs)
+            if mount_target:
+                self._ensure_steam_layout(mount_target, label, logs)
+                logs.append(f"mounted at: {mount_target}")
+
+            decky.logger.info("map-storage self-heal: %s", "; ".join(logs))
+        except Exception:
+            decky.logger.exception("map-storage self-heal failed: %s", "; ".join(logs))
+
+    async def reapply_now(self) -> Dict[str, object]:
+        """Manual trigger for the self-healing routine (UI button)."""
+        config = self._load_config()
+        device_path = config.get("device_path", "")
+        label = config.get("label", "")
+        if not device_path and not label:
+            return {"ok": False, "errors": ["no saved configuration to re-apply"]}
+        self._self_heal()
+        partition = ""
+        if label:
+            try:
+                partition = self._run_cli(
+                    [self._tool("blkid"), "-L", self._validate_label(label)]
+                ).stdout.strip()
+            except Exception:
+                partition = ""
+        mount_target = self._findmnt_target(partition) if partition else ""
+        return {
+            "ok": bool(mount_target),
+            "label": label,
+            "partition": partition,
+            "mount_target": mount_target,
+            "errors": [] if mount_target else ["not mounted after re-apply"],
+        }
+
     async def _main(self):
         decky.logger.info("map-storage backend loaded")
+        try:
+            self._self_heal()
+        except Exception:
+            decky.logger.exception("map-storage self-heal crashed on load")
 
     async def _unload(self):
         decky.logger.info("map-storage backend unloaded")
