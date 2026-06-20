@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-06-20
+
+### Fixed
+
+- Device dropdown now keeps the disk you pick: the load effect ran on every selection change, re-scanning and reverting your choice.
+- Repeating toast popups: automatic scans (on open and after actions) no longer raise toasts; only manual "Rescan" does.
+- Selection is preserved across rescans when the device is still present; auto-pick only happens when there is no valid selection.
+
 ## [0.1.6] - 2026-06-20
 
 ### Fixed
@@ -90,7 +98,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial Map Storage plugin: storage setup UI, format toggle, automount fix for Steam Game Mode.
 - GitHub Actions CI and release workflow with downloadable ZIPs.
 
-[Unreleased]: https://github.com/evertonfxavier/map-storage/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/evertonfxavier/map-storage/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.7
 [0.1.6]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.6
 [0.1.5]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.5
 [0.1.4]: https://github.com/evertonfxavier/map-storage/releases/tag/v0.1.4

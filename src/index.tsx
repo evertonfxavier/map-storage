@@ -13,7 +13,7 @@ import {
   definePlugin,
   toaster,
 } from "@decky/api";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FaHdd } from "react-icons/fa";
 
 type StorageScanResult = {
@@ -215,6 +215,11 @@ function Content() {
   const selectedDevice = devices.find((d) => d.path === selectedPath);
   const selectedStorageLabel = storageLabelOf(selectedDevice) || label;
 
+  const selectedPathRef = useRef(selectedPath);
+  useEffect(() => {
+    selectedPathRef.current = selectedPath;
+  }, [selectedPath]);
+
   const selectedSummary = useMemo(() => {
     if (!selectedPath) {
       return "No device selected — run Rescan and pick a partition.";
@@ -304,26 +309,34 @@ function Content() {
           "If NVMe1TB appears in Steam Settings, the label is likely NVMe1TB.",
         ];
         setOutput(lines.join("\n"));
-        toaster.toast({
-          title: "No devices",
-          body: scan.error || "Scan returned an empty list",
-        });
+        if (fromUser) {
+          toaster.toast({
+            title: "No devices",
+            body: scan.error || "Scan returned an empty list",
+          });
+        }
         return;
       }
 
       setScanState("ok");
 
-      const keepPath = savedPath || selectedPath;
+      const keepPath = savedPath || selectedPathRef.current;
       const stillValid = list.find((d) => d.path === keepPath);
-      const preferred = stillValid ?? pickPreferredDevice(list);
 
-      if (preferred) {
-        setSelectedPath(preferred.path);
-        const detected = storageLabelOf(preferred);
-        if (detected) {
-          setLabel(detected);
-        } else if (preferred.label) {
-          setLabel(preferred.label);
+      // Keep the current/saved selection when it is still present;
+      // only auto-pick when there is no valid selection yet.
+      if (stillValid) {
+        setSelectedPath(stillValid.path);
+      } else {
+        const preferred = pickPreferredDevice(list);
+        if (preferred) {
+          setSelectedPath(preferred.path);
+          const detected = storageLabelOf(preferred);
+          if (detected) {
+            setLabel(detected);
+          } else if (preferred.label) {
+            setLabel(preferred.label);
+          }
         }
       }
 
@@ -333,21 +346,25 @@ function Content() {
           .join("\n")
       );
 
-      toaster.toast({
-        title: "Scan complete",
-        body: `${list.length} device(s) found`,
-      });
+      if (fromUser) {
+        toaster.toast({
+          title: "Scan complete",
+          body: `${list.length} device(s) found`,
+        });
+      }
     } catch (error) {
       const msg = errorMessage(error);
       setScanState("error");
       setDevices([]);
       setOutput(`Scan failed:\n${msg}\n\nIs the plugin backend running?`);
-      toaster.toast({ title: "Scan error", body: msg });
+      if (fromUser) {
+        toaster.toast({ title: "Scan error", body: msg });
+      }
       console.error("[map-storage] scan failed", error);
     } finally {
       setBusy(false);
     }
-  }, [selectedPath]);
+  }, []);
 
   const checkBackend = async () => {
     try {
@@ -360,7 +377,7 @@ function Content() {
       const msg = errorMessage(error);
       setScanState("error");
       setOutput(`Backend not reachable:\n${msg}`);
-      toaster.toast({ title: "Backend error", body: msg });
+      console.error("[map-storage] backend ping failed", error);
     }
   };
 
@@ -381,7 +398,9 @@ function Content() {
       }
       await refreshDevices(false, savedPath);
     })();
-  }, [refreshDevices]);
+    // Run only once when the panel opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const persistConfig = async () => {
     await saveConfig(selectedPath, label, formatOnApply);
