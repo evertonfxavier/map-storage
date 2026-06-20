@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-06-20
+
+### Changed
+
+- Redesigned the Quick Access panel for clarity: a single colored status card (ready / not mounted / no access) at the top, a clean drive picker, and one primary "Enable automount" action.
+- Moved label editing, format, re-apply, logs and status checks into a collapsible "Advanced" section to reduce clutter.
+- Replaced constant scan/status toasts with quiet background refreshes; toasts now fire only on explicit user actions.
+- Added a compact "Details" footer (device, mount, service, version/root) instead of a raw log dump.
+
+### Refactor
+
+- Rewrote `src/index.tsx`: smaller helpers, presentational `StatusCard`, no inline comments, less duplicated action boilerplate.
+
 ## [0.1.8] - 2026-06-20
 
 ### Fixed

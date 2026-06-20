@@ -176,13 +176,6 @@ class Plugin:
         decky.logger.info("exec: %s", command)
         return self._run_cli(["/bin/bash", "-c", command], check=check)
 
-    def _run_as_deck_user(self, command: str, deck_user: str) -> subprocess.CompletedProcess:
-        if os.getuid() == 0:
-            return self._run_cli(
-                ["/usr/bin/runuser", "-u", deck_user, "--", "/bin/bash", "-c", command]
-            )
-        return self._run(f"/usr/bin/sudo -u {shlex.quote(deck_user)} {command}")
-
     def _blkid_field(self, device: str, field: str) -> str:
         blkid = self._tool("blkid")
         result = self._run_cli(
@@ -702,10 +695,6 @@ class Plugin:
                 }
             )
 
-    async def list_nvme_devices(self) -> str:
-        """Backward-compatible alias."""
-        return await self.list_storage_devices()
-
     async def get_config(self) -> Dict[str, Any]:
         return self._load_config()
 
@@ -852,10 +841,6 @@ class Plugin:
             errors.append(str(error))
             decky.logger.exception("format_storage failed")
             return {"ok": False, "label": label, "logs": logs, "errors": errors}
-
-    async def format_nvme(self, device_path: str, label: str) -> Dict[str, object]:
-        """Backward-compatible alias."""
-        return await self.format_storage(device_path, label)
 
     def _disable_legacy_service(self, logs: List[str]) -> None:
         systemctl = self._tool("systemctl")
@@ -1099,12 +1084,6 @@ class Plugin:
                 "logs": logs,
                 "errors": errors,
             }
-
-    async def apply_nvme_fix(
-        self, device_path: str, label: str, format_drive: bool
-    ) -> Dict[str, object]:
-        """Backward-compatible alias."""
-        return await self.apply_storage_fix(device_path, label, format_drive)
 
     def _install_automount_units(
         self, label: str, deck_user: str, logs: List[str]
