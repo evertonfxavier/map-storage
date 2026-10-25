@@ -3,19 +3,7 @@ import { StatusCard } from "./StatusCard";
 import type { MapStorageModel } from "../hooks";
 
 export function StatusBanner({ model }: { model: MapStorageModel }) {
-  const {
-    busy,
-    isRoot,
-    scanError,
-    selectedPath,
-    isMounted,
-    storageName,
-    selectedDevice,
-    mountTarget,
-    serviceActive,
-  } = model;
-
-  const sizeSuffix = selectedDevice?.size ? ` · ${selectedDevice.size}` : "";
+  const { busy, isRoot, scanError, drives, enabledDrives, attentionDrives } = model;
 
   const card = (() => {
     if (busy) return <StatusCard tone="info" title="Working…" lines={[]} busy />;
@@ -37,38 +25,45 @@ export function StatusBanner({ model }: { model: MapStorageModel }) {
       return <StatusCard tone="danger" title="Scan failed" lines={[scanError]} />;
     }
 
-    if (!selectedPath) {
+    if (!drives.length) {
       return (
         <StatusCard
           tone="warn"
-          title="No storage selected"
-          lines={["Tap “Re-scan drives” and choose your library drive."]}
+          title="No drives found"
+          lines={["Plug in a drive and tap “Re-scan drives”."]}
         />
       );
     }
 
-    if (isMounted) {
+    if (!enabledDrives.length) {
       return (
         <StatusCard
-          tone="ok"
-          title="Library ready"
-          lines={[
-            `${storageName}${sizeSuffix}`,
-            `Mounted at ${mountTarget}`,
-            serviceActive ? "Automount service active" : "Available in Game Mode",
-          ]}
+          tone="info"
+          title="No drive enabled"
+          lines={["Flip a switch below so Steam can use that drive."]}
+        />
+      );
+    }
+
+    if (attentionDrives.length) {
+      return (
+        <StatusCard
+          tone="warn"
+          title="Needs attention"
+          lines={attentionDrives.map((d) =>
+            d.present
+              ? `${d.name}: not mounted — try “Re-apply” in Advanced`
+              : `${d.name}: not connected`
+          )}
         />
       );
     }
 
     return (
       <StatusCard
-        tone="warn"
-        title="Not mounted yet"
-        lines={[
-          `${storageName}${sizeSuffix}`,
-          "Tap “Enable automount” to mount it now and on every boot.",
-        ]}
+        tone="ok"
+        title={enabledDrives.length > 1 ? "Libraries ready" : "Library ready"}
+        lines={enabledDrives.map((d) => `${d.name} · ${d.size} · ${d.mountpoint}`)}
       />
     );
   })();

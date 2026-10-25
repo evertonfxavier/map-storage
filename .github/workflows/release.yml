@@ -49,6 +49,9 @@ jobs:
           node-version: 20
           cache: pnpm
 
+      - name: Backend tests
+        run: python3 -m unittest discover -s tests -v
+
       - name: Build plugin ZIP
         env:
           CI: true
@@ -72,7 +75,7 @@ jobs:
 
           - [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader)
           - Expansion NVMe drive
-          - Plugin uses root privileges (\`_root\` flag) for system configuration
+          - Plugin uses root privileges (\`root\` flag) for system configuration
 
           See [README](https://github.com/${{ github.repository }}#installation) for usage.
           EOF

@@ -1,6 +1,6 @@
 {
   "name": "map-storage",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "description": "Decky plugin to setup any plugged storage on Steam Deck (optional format + udisks2 automount)",
   "type": "module",
   "packageManager": "pnpm@9.15.0",
@@ -9,7 +9,7 @@
     "build:zip": "bash scripts/build-zip.sh",
     "build:ci": "bash scripts/ci-build-zip.sh",
     "watch": "rollup -c -w",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "python3 -m unittest discover -s tests"
   },
   "repository": {
     "type": "git",

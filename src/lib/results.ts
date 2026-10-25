@@ -1,9 +1,20 @@
-import type { FixResult, StorageDevice, StorageScanResult } from "../model";
+import type { ActionResult, ScanResult } from "../model";
 
 export const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-export const parseScanResult = (raw: unknown): StorageScanResult => {
+const emptyScan = (error: string): ScanResult => ({
+  ok: false,
+  error,
+  debug: "",
+  count: 0,
+  os_known: false,
+  drives: [],
+  format_targets: [],
+  service: {},
+});
+
+export const parseScanResult = (raw: unknown): ScanResult => {
   let data: unknown = raw;
 
   if (typeof data === "string") {
@@ -11,53 +22,30 @@ export const parseScanResult = (raw: unknown): StorageScanResult => {
     try {
       data = JSON.parse(data);
     } catch {
-      return {
-        devices: [],
-        debug: "",
-        error: `Invalid JSON from backend: ${snippet}`,
-        ok: false,
-        count: 0,
-      };
+      return emptyScan(`Invalid JSON from backend: ${snippet}`);
     }
   }
 
-  if (Array.isArray(data)) {
-    const devices = data as StorageDevice[];
-    return {
-      devices,
-      debug: "legacy list",
-      error: "",
-      ok: devices.length > 0,
-      count: devices.length,
-    };
+  if (!data || typeof data !== "object") {
+    return emptyScan("Empty response from backend");
   }
 
-  const obj = (data ?? {}) as Record<string, unknown>;
-  const devices = Array.isArray(obj.devices)
-    ? (obj.devices as StorageDevice[])
-    : [];
-
+  const obj = data as Partial<ScanResult>;
   return {
-    devices,
-    debug: String(obj.debug ?? ""),
+    ok: Boolean(obj.ok),
     error: String(obj.error ?? ""),
-    ok: Boolean(obj.ok ?? devices.length > 0),
-    count: Number(obj.count ?? devices.length),
+    debug: String(obj.debug ?? ""),
+    count: Number(obj.count ?? 0),
+    os_known: Boolean(obj.os_known),
+    drives: Array.isArray(obj.drives) ? obj.drives : [],
+    format_targets: Array.isArray(obj.format_targets) ? obj.format_targets : [],
+    service: obj.service ?? {},
   };
 };
 
-export const fixResultText = (result: FixResult): string => {
-  const lines = [
-    `ok: ${result.ok}`,
-    `label: ${result.label}`,
-    `device: ${result.device_path ?? "n/a"}`,
-    `partition: ${result.partition ?? "n/a"}`,
-    `mount: ${result.mount_target ?? "n/a"}`,
-    `formatted: ${result.formatted ?? false}`,
-    "",
-    ...result.logs,
-  ];
-  if (result.errors.length) {
+export const actionText = (result: ActionResult): string => {
+  const lines = [`ok: ${result.ok}`, ...(result.logs ?? [])];
+  if (result.errors?.length) {
     lines.push("", "errors:", ...result.errors);
   }
   return lines.join("\n");

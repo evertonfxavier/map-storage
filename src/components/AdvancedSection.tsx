@@ -1,31 +1,46 @@
 import {
   ButtonItem,
+  ConfirmModal,
+  Dropdown,
   PanelSection,
   PanelSectionRow,
+  showModal,
   TextField,
-  ToggleField,
 } from "@decky/ui";
-import { isTrue } from "../lib";
+import { LABEL_PATTERN, formatTargetLabel } from "../lib";
+import { MUTED } from "../theme";
 import type { MapStorageModel } from "../hooks";
 
 export function AdvancedSection({ model }: { model: MapStorageModel }) {
   const {
     showAdvanced,
     setShowAdvanced,
-    label,
-    setLabel,
-    formatOnApply,
-    setFormatOnApply,
     busy,
-    selectedPath,
-    selectedDevice,
-    runFormatOnly,
+    formatTargets,
+    formatPath,
+    setFormatPath,
+    formatLabel,
+    setFormatLabel,
+    runFormat,
     runReapply,
     showLogs,
-    loadStatus,
   } = model;
 
-  const isSystem = isTrue(selectedDevice?.is_system);
+  const target = formatTargets.find((t) => t.path === formatPath);
+  const labelValid = LABEL_PATTERN.test(formatLabel);
+
+  const confirmFormat = () => {
+    if (!target) return;
+    showModal(
+      <ConfirmModal
+        strTitle="Erase this drive?"
+        strDescription={`Everything on ${target.name} (${target.path}, ${target.size}) will be permanently erased and formatted as ext4 “${formatLabel}”.`}
+        strOKButtonText="Erase and format"
+        bDestructiveWarning
+        onOK={() => void runFormat(target)}
+      />
+    );
+  };
 
   return (
     <PanelSection title="Advanced">
@@ -38,48 +53,48 @@ export function AdvancedSection({ model }: { model: MapStorageModel }) {
       {showAdvanced ? (
         <>
           <PanelSectionRow>
-            <TextField
-              label="Filesystem label"
-              value={label}
-              onChange={(event) => setLabel(event.target.value)}
-              disabled={busy}
-            />
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <ToggleField
-              label="Format before setup"
-              description="Erases all data on the selected drive."
-              checked={formatOnApply}
-              onChange={setFormatOnApply}
-              disabled={busy}
-            />
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <ButtonItem
-              layout="below"
-              onClick={() => void runFormatOnly()}
-              disabled={busy || !selectedPath || isSystem}
-            >
-              Format only (destructive)
-            </ButtonItem>
-          </PanelSectionRow>
-          <PanelSectionRow>
             <ButtonItem layout="below" onClick={() => void runReapply()} disabled={busy}>
-              Re-apply after system update
+              Re-apply and mount now
             </ButtonItem>
           </PanelSectionRow>
           <PanelSectionRow>
             <ButtonItem layout="below" onClick={() => void showLogs()} disabled={busy}>
-              Show service logs
+              Show mount logs
             </ButtonItem>
+          </PanelSectionRow>
+
+          <PanelSectionRow>
+            <div style={{ fontSize: "0.8em", color: MUTED }}>
+              Format a drive (erases everything on it). System disks are not listed.
+            </div>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <Dropdown
+              rgOptions={formatTargets.map((t) => ({
+                data: t.path,
+                label: formatTargetLabel(t),
+              }))}
+              selectedOption={formatPath || null}
+              strDefaultLabel="Choose a drive to format"
+              onChange={(option) => setFormatPath(String(option?.data ?? ""))}
+              disabled={busy || !formatTargets.length}
+            />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <TextField
+              label="New filesystem label"
+              value={formatLabel}
+              onChange={(event) => setFormatLabel(event.target.value)}
+              disabled={busy}
+            />
           </PanelSectionRow>
           <PanelSectionRow>
             <ButtonItem
               layout="below"
-              onClick={() => void loadStatus(false)}
-              disabled={busy || !selectedPath}
+              onClick={confirmFormat}
+              disabled={busy || !target || !labelValid}
             >
-              Check status
+              Erase, format and enable…
             </ButtonItem>
           </PanelSectionRow>
         </>

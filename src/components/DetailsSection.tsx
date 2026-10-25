@@ -3,12 +3,12 @@ import { MUTED } from "../theme";
 import type { MapStorageModel } from "../hooks";
 
 export function DetailsSection({ model }: { model: MapStorageModel }) {
-  const { status, selectedPath, mountTarget, pluginVersion, isRoot, output } = model;
+  const { scan, enabledDrives, drives, pluginVersion, isRoot, output } = model;
 
+  const service = scan?.service ?? {};
   const summary = [
-    `Device: ${status?.device_path || selectedPath || "none"}`,
-    `Mount: ${mountTarget || "not mounted"}`,
-    `Service: ${status?.service_active ?? "unknown"} (${status?.service_enabled ?? "unknown"})`,
+    `Enabled: ${enabledDrives.length} of ${drives.length} drive(s)`,
+    `Boot service: ${service.active ?? "unknown"} (${service.enabled ?? "unknown"})`,
     pluginVersion ? `Plugin v${pluginVersion}${isRoot ? " · root" : ""}` : "",
   ]
     .filter(Boolean)

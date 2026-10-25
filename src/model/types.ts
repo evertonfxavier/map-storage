@@ -1,57 +1,56 @@
-export type StorageDevice = {
-  id: string;
-  path: string;
+export type Drive = {
+  uuid: string;
   name: string;
-  size: string;
-  type: string;
-  fstype: string;
   label: string;
-  storage_label?: string;
-  mountpoint: string;
+  size: string;
+  fstype: string;
+  path: string;
   model: string;
   transport: string;
-  is_system: string;
-  can_format: string;
-  is_mounted?: string;
-  is_expansion?: string;
+  mountpoint: string;
+  mounted: boolean;
+  enabled: boolean;
+  present: boolean;
 };
 
-export type StorageScanResult = {
-  devices: StorageDevice[];
-  debug: string;
+export type FormatTarget = {
+  path: string;
+  fingerprint: string;
+  type: string;
+  name: string;
+  size: string;
+  fstype: string;
+  label: string;
+  model: string;
+  mounted: boolean;
+};
+
+export type ServiceState = {
+  enabled: string;
+  active: string;
+  has_udev_rule: boolean;
+  has_helper: boolean;
+  has_unit: boolean;
+};
+
+export type ScanResult = {
+  ok: boolean;
   error: string;
-  ok: boolean;
+  debug: string;
   count: number;
+  os_known: boolean;
+  drives: Drive[];
+  format_targets: FormatTarget[];
+  service: Partial<ServiceState>;
 };
 
-export type PluginConfig = {
-  device_path: string;
-  label: string;
-  format_on_apply: boolean;
-};
-
-export type FixResult = {
+export type ActionResult = {
   ok: boolean;
-  label: string;
-  device_path?: string;
-  partition?: string;
-  mount_target?: string;
-  formatted?: boolean;
   logs: string[];
   errors: string[];
-};
-
-export type StatusResult = {
-  device_path: string;
-  label: string;
-  partition: string;
-  mount_target: string;
-  readonly_status: string;
-  service_enabled: string;
-  service_active: string;
-  has_udev_rule: string;
-  has_mount_script: string;
-  has_service_file: string;
-  configured_label: string;
-  storage_label?: string;
+  label?: string;
+  uuid?: string;
+  enabled?: boolean;
+  partition?: string;
+  mount_target?: string;
 };

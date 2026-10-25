@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-25
+
+Fixes the NVMe no longer being recognized after the SteamOS update, and lets you switch drives on and off.
+
+### Fixed
+
+- **Device names are not stable.** With two NVMe drives, `nvme0n1`/`nvme1n1` swap places between boots (seen on SteamOS 3.8.28 / kernel 6.18). The plugin stored `/dev/nvme1n1p1`; after a swap that was the **EFI system partition**, so the config, the udev rule and the status all pointed at the wrong disk (the log even shows a rule written for label `esp`). Drives are now identified by filesystem UUID everywhere.
+- **Library mounted after Steam started.** The udev rule never matched the right partition, so the drive only came up ~30 s after boot, once Decky self-healed — after Steam had already launched without the library. A boot unit ordered `Before=sddm.service` plus a UUID-based udev rule now mount it first.
+- **`udisksctl mount` as `deck` was refused by polkit** (`NotAuthorizedCanObtain`, NVMe is a "system" device) and failed silently 10 times before falling back to a raw `mount`. The helper now calls udisks as root with `as-user=deck`, like SteamOS's own `steamos-automount.sh`.
+- Opening the panel overwrote the saved label with the default `SteamLibrary` (status refresh re-saved the UI state). The UI no longer saves anything except on an explicit action.
+- Plugin no longer disables `steamos-readonly` (it stayed disabled after every setup). Files live under `/etc` only.
+
+### Added
+
+- Per-drive on/off switches; several drives can be enabled at once. Disabling stops automount and unmounts the drive if it is idle.
+- Backend safety: the SteamOS disk (found from what is mounted at `/`, `/home`, `/var`, `/efi` and from SteamOS partsets, not from an nvme index) is never offered, enabled or formatted. Format also requires the drive's fingerprint, so a stale path cannot wipe other media.
+- Format asks for confirmation and no longer uses lazy/forced unmounts; it refuses if the drive is in use.
+- Config v2 (by UUID) with automatic, conservative migration of the 0.1.x config.
+- Unit tests (`pnpm test`) built on a real `lsblk` capture, in both NVMe orderings; run in CI.
+
+### Changed
+
+- Backend rewritten around `lsblk` JSON; blocking work runs in threads so it no longer stalls Decky.
+- Removed `apply_storage_fix`, `get_status`, `save_config`, `get_config` (replaced by `set_drive_enabled`, `list_storage_devices`, `format_storage`, `reapply_now`).
+
 ## [0.1.9] - 2026-06-20
 
 ### Changed

@@ -1,6 +1,6 @@
 export { StoragePanel } from "./StoragePanel";
 export { StatusBanner } from "./StatusBanner";
-export { StorageSection } from "./StorageSection";
+export { DrivesSection } from "./DrivesSection";
 export { AdvancedSection } from "./AdvancedSection";
 export { DetailsSection } from "./DetailsSection";
 export { StatusCard } from "./StatusCard";
