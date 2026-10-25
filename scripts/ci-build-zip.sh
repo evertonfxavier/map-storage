@@ -29,8 +29,12 @@ pnpm run build
 
 mkdir -p "${OUT_DIR}"
 
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  echo "==> Decky CLI (docker available)"
+# The frontend is already built on the host. The Decky CLI would rebuild it inside
+# ghcr.io/steamdeckhomebrew/builder:latest, a floating image that broke CI once its
+# pnpm (v11) could no longer write to HOME. Package directly; opt back in with
+# USE_DECKY_CLI=true.
+if [[ "${USE_DECKY_CLI:-}" == "true" ]] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  echo "==> Decky CLI (USE_DECKY_CLI=true)"
   mkdir -p "${ROOT_DIR}/cli"
   curl -fsSL \
     -o "${CLI_BIN}" \
@@ -38,7 +42,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   chmod +x "${CLI_BIN}"
   "${CLI_BIN}" plugin build "${ROOT_DIR}"
 else
-  echo "==> Manual ZIP packager (no docker)"
+  echo "==> Manual ZIP packager"
   bash "${ROOT_DIR}/scripts/package-zip-manual.sh"
 fi
 

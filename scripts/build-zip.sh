@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Local build: out/Map Storage.zip + out/map-storage-vX.Y.Z.zip
-# Usage: pnpm run build:zip
+# Usage: pnpm run build:zip   (USE_DECKY_CLI=true to build through the Decky CLI/Docker)
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
-if [[ "${CI:-}" == "true" ]] || { [[ "$(uname -s)" == "Linux" ]] && command -v docker >/dev/null && docker info >/dev/null 2>&1; }; then
+if [[ "${CI:-}" == "true" ]]; then
   exec bash "${ROOT_DIR}/scripts/ci-build-zip.sh"
 fi
 
@@ -19,10 +19,6 @@ docker_available() {
 
 echo "==> map-storage: local build"
 
-if [[ ! -x "${CLI_BIN}" ]]; then
-  bash "${ROOT_DIR}/scripts/install-decky-cli.sh"
-fi
-
 pnpm run build
 
 for f in plugin.json package.json main.py LICENSE; do
@@ -32,11 +28,12 @@ done
 mkdir -p "${OUT_DIR}"
 PACKAGED=0
 
-if docker_available; then
-  echo "==> Decky CLI"
+if [[ "${USE_DECKY_CLI:-}" == "true" ]] && docker_available; then
+  [[ -x "${CLI_BIN}" ]] || bash "${ROOT_DIR}/scripts/install-decky-cli.sh"
+  echo "==> Decky CLI (USE_DECKY_CLI=true)"
   "${CLI_BIN}" plugin build "${ROOT_DIR}" && PACKAGED=1
 else
-  echo "==> Manual ZIP (Docker not running)"
+  echo "==> Manual ZIP"
 fi
 
 if [[ "${PACKAGED}" -eq 0 ]]; then
